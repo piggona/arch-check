@@ -1,7 +1,7 @@
 {
   "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
   "name": "arch-check",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "displayName": "Arch Check",
   "description": "研发代码后的架构检查：变更级检查、全库审计、架构债台账，外加写后自动嗅探。",
   "author": {

@@ -50,6 +50,10 @@ function detectLayer(filePath) {
   return null;
 }
 
+function readSource(filePath) {
+  try { return fs.readFileSync(filePath, 'utf8'); } catch (e) { return null; }
+}
+
 // ---------- import 提取（JS/TS + Python，覆盖主流即可） ----------
 function extractImports(source) {
   const found = [];
@@ -65,12 +69,9 @@ function extractImports(source) {
   return [...new Set(found)];
 }
 
-function checkFile(filePath) {
+function checkFile(filePath, source) {
   const layer = detectLayer(filePath);
   if (!layer) return null; // 识别不出层级 → 不猜，交给 /arch-check 深查
-
-  let source;
-  try { source = fs.readFileSync(filePath, 'utf8'); } catch (e) { return null; }
 
   const rule = SNIFF_RULES.find((r) => r.layer === layer);
   if (!rule) return null;
@@ -110,6 +111,23 @@ function checkFile(filePath) {
   };
 }
 
+// ---------- 状态同步嗅探：轮询/订阅式消费（NOTE 级提醒，永不阻断） ----------
+// 长耗时任务状态同步的常见事故形态：消费方轮询"数据是否出现"当作"步骤完成"，
+// 或多实例同时监听同一状态无认领/幂等保护。单文件静态判断不了对错，
+// 只做温和提醒（hint 文案），即使 enforce 档也不 block——宁可漏报不可误伤。
+const POLL_LOOP_RE = /while\s*\(\s*true|while\s+True|setInterval\s*\(|PollingLooper/i;
+const CONSUME_RE = /SELECT\s|\.query\s*\(|\.findOne?\s*\(|subscribe\s*\(|\.consume\s*\(|on\s*\(\s*['"]message|@KafkaListener|from\s+\w+\s+import/i;
+
+function sniffPollingConsumer(source) {
+  if (POLL_LOOP_RE.test(source) && CONSUME_RE.test(source)) {
+    return '状态同步提醒: 检测到轮询/订阅式消费 — 确认消费的是终态而非中间态' +
+      '（"数据出现" ≠ "步骤完成"，完成信号应在全部数据落库后置位），' +
+      '且多实例并发时有原子认领（UPDATE…WHERE status= 并查影响行数）或幂等保护。' +
+      '详见 /arch-check 状态同步专项。';
+  }
+  return null;
+}
+
 // ---------- 主流程 ----------
 if (config.watcher === 'off') process.exit(0);
 
@@ -120,16 +138,21 @@ readHookInput((event) => {
     if (!filePath || typeof filePath !== 'string') process.exit(0);
     if (!/\.(js|jsx|ts|tsx|mjs|cjs|py)$/.test(filePath)) process.exit(0);
 
-    const hit = checkFile(filePath);
-    if (!hit) process.exit(0);
+    const source = readSource(filePath);
+    if (source === null) process.exit(0);
 
-    if (config.watcher === 'enforce') {
+    const archHit = checkFile(filePath, source);   // 架构违规（可 enforce）
+    const pollNote = sniffPollingConsumer(source); // 状态同步提醒（永不 enforce）
+
+    if (config.watcher === 'enforce' && archHit) {
       writeHookOutput('PostToolUse', null, {
         decision: 'block',
-        reason: hit.msg + '（enforce 模式：请修正依赖方向后继续）',
+        reason: archHit.msg + (pollNote ? ' 另: ' + pollNote : '') +
+          '（enforce 模式：请修正依赖方向后继续）',
       });
-    } else {
-      writeHookOutput('PostToolUse', hit.msg);
+    } else if (archHit || pollNote) {
+      writeHookOutput('PostToolUse',
+        [archHit && archHit.msg, pollNote].filter(Boolean).join('\n'));
     }
   } catch (e) {
     // 嗅探失败 = 静默通过，绝不阻塞写文件

@@ -126,7 +126,36 @@ test('watcher: 带 BOM 的事件 JSON 不炸', () => {
   assert.equal(r.status, 0, r.stderr);
 });
 
-test('watcher: 空/垃圾 stdin 不炸（超时自救路径）', () => {
+test('watcher: 空垃圾 stdin 不炸（超时自救路径）', () => {
   const r = run('arch-watcher.js', {}, 'not-json-at-all');
   assert.equal(r.status, 0, r.stderr);
+});
+
+// ---------- 状态同步嗅探（轮询式消费提醒） ----------
+
+test('watcher: 轮询循环 + 查询消费 → 输出状态同步提醒', () => {
+  const f = writeFixture('src/services/poller.ts',
+    "async function loop() {\n  while (true) {\n    const rows = db.query('SELECT * FROM tasks WHERE status = 1');\n    await sleep(1000);\n  }\n}\n");
+  const r = run('arch-watcher.js', {}, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.match(out.hookSpecificOutput.additionalContext, /状态同步提醒/);
+});
+
+test('watcher: 轮询但无查询消费特征 → 静默（防误报）', () => {
+  const f = writeFixture('src/ui/clock.ts',
+    "setInterval(() => { console.log('tick'); }, 1000);\n");
+  const r = run('arch-watcher.js', {}, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout, '');
+});
+
+test('watcher(enforce): 轮询提醒不升级为 block（只有架构违规才 block）', () => {
+  const f = writeFixture('src/services/poller2.ts',
+    "while (true) { const r = await db.query('SELECT 1'); }\n");
+  const r = run('arch-watcher.js', { ARCH_CHECK_WATCHER: 'enforce' }, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.equal(out.decision, undefined, '轮询提醒不应产生 decision:block');
+  assert.match(out.hookSpecificOutput.additionalContext, /状态同步提醒/);
 });
