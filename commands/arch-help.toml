@@ -1,0 +1,2 @@
+description = "arch-check 插件速查"
+prompt = "按 skills/arch-help/SKILL.md 的内容输出速查表：四个命令及参数、规则来源优先级、arch-debt 标记语法示例、SessionStart/PostToolUse 钩子的自动行为、ARCH_CHECK_WATCHER 与 ARCH_CHECK_ACTIVATE 两个配置项的取值。"

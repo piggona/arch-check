@@ -1,0 +1,7 @@
+# 临时文件
+node_modules/
+*.log
+.DS_Store
+
+# 本地测试产物
+/test-output/

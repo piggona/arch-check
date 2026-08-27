@@ -1,0 +1,17 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "arch-check",
+  "description": "架构检查插件：变更级检查、全库审计、架构债台账。",
+  "owner": {
+    "name": "piggona",
+    "url": "https://github.com/piggona"
+  },
+  "plugins": [
+    {
+      "name": "arch-check",
+      "description": "研发代码后的架构检查：依赖方向、分层、边界、循环依赖 + arch-debt 债务闭环。",
+      "source": "./",
+      "category": "code-quality"
+    }
+  ]
+}

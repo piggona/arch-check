@@ -1,0 +1,2 @@
+description = "变更后架构检查（默认 staged）"
+prompt = "按 skills/arch-check/SKILL.md 定义的流程对当前变更做架构检查。范围：{{args}}（未指定默认 staged，无暂存回退 main...HEAD）。规则来源优先读项目根 ARCHITECTURE.md，没有则用技能内置通用原则。输出格式：file:line [BLOCKER|WARN|NOTE] 规则 — 问题 → 修复建议，末尾一行汇总。只读不改。"

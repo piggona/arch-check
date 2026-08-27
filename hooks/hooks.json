@@ -1,0 +1,31 @@
+{
+  "_comment": "钩子映射，Claude 与 Codex 共享（两边事件名兼容）。只注册公共事件子集，避免宿主差异。",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/arch-activate.js\"",
+            "timeout": 5,
+            "statusMessage": "加载架构检查..."
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/arch-watcher.js\"",
+            "timeout": 5,
+            "statusMessage": "架构嗅探..."
+          }
+        ]
+      }
+    ]
+  }
+}

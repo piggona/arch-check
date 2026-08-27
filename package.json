@@ -1,0 +1,29 @@
+{
+  "name": "arch-check",
+  "version": "0.1.0",
+  "description": "研发代码后的架构检查插件：变更级检查、全库审计、架构债台账，外加写后自动嗅探。Claude Code + Codex 双宿主。",
+  "keywords": ["claude-code", "codex", "plugin", "architecture", "code-review"],
+  "license": "MIT",
+  "author": {
+    "name": "piggona",
+    "url": "https://github.com/piggona"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/piggona/arch-check.git"
+  },
+  "files": [
+    "AGENTS.md",
+    "skills/",
+    "commands/",
+    "agents/",
+    "hooks/",
+    "templates/",
+    "scripts/",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test tests/*.test.js",
+    "validate": "sh scripts/validate.sh"
+  }
+}

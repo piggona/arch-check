@@ -1,0 +1,2 @@
+description = "收割架构债台账"
+prompt = "按 skills/arch-debt/SKILL.md 收割全库 arch-debt: 注释标记：git grep -nE '(#|//|/*) ?arch-debt:'（跳过 node_modules/.git/构建产物），每条输出 file:line — 上限/风险 · 触发条件 · 状态（在期/到期/no-trigger，对照当前日期判定），末尾一行汇总。默认只读不改；仅在用户明确要求时写入 ARCH-DEBT.md 且写前展示全文。"
