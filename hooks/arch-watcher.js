@@ -128,6 +128,28 @@ function sniffPollingConsumer(source) {
   return null;
 }
 
+// ---------- 日志串联嗅探：日志调用但缺追踪 ID（NOTE 级提醒，永不阻断） ----------
+// 在线流程的日志要能通过 ID 串联并标识来源：request_id / user_id /
+// tenant_id(enterprise_id)。单文件静态判断不了链路是否真的断了，
+// 只做温和提醒。domain 层豁免——请求上下文应注入在调用方的 logger 里，
+// 领域层日志不要求携带。
+const LOG_CALL_RE = /(?:logger|log|logging)\s*\.\s*(?:info|warn|warning|error|debug|trace)\s*\(|console\.\s*(?:log|info|warn|error)\s*\(/;
+const TRACE_ID_RE = /request_?id|requestid|trace_?id|x-request-id|correlation_?id|user_?id|userid|tenant_?id|enterprise_?id|_ctx|loggerContext|mdc/i;
+
+function sniffLogTrace(source, layer) {
+  // 只针对服务端代码（service/infra 层）：domain 的上下文应注入在调用方；
+  // ui 层多为前端组件，无 request_id 概念；识别不出层级的多为脚本/入口，
+  // 宁可漏报不误伤——全部豁免，深查交给 /arch-check 日志串联专项。
+  if (layer !== 'service' && layer !== 'infra') return null;
+  if (LOG_CALL_RE.test(source) && !TRACE_ID_RE.test(source)) {
+    return '日志串联提醒: 检测到日志调用但文件内未见 request_id/user_id/tenant_id — ' +
+      '在线流程的日志应通过 ID 串联并标识来源（请求带 request_id、涉用户带 user_id、' +
+      '涉企业带 tenant_id/enterprise_id，入口注入日志上下文而非层层传参）。' +
+      '详见 /arch-check 日志串联专项。';
+  }
+  return null;
+}
+
 // ---------- 主流程 ----------
 if (config.watcher === 'off') process.exit(0);
 
@@ -141,18 +163,23 @@ readHookInput((event) => {
     const source = readSource(filePath);
     if (source === null) process.exit(0);
 
+    const layer = detectLayer(filePath);
     const archHit = checkFile(filePath, source);   // 架构违规（可 enforce）
-    const pollNote = sniffPollingConsumer(source); // 状态同步提醒（永不 enforce）
+    const notes = [
+      sniffPollingConsumer(source),                // 状态同步提醒（永不 enforce）
+      sniffLogTrace(source, layer),                // 日志串联提醒（永不 enforce）
+    ].filter(Boolean);
 
     if (config.watcher === 'enforce' && archHit) {
       writeHookOutput('PostToolUse', null, {
         decision: 'block',
-        reason: archHit.msg + (pollNote ? ' 另: ' + pollNote : '') +
+        reason: archHit.msg +
+          (notes.length ? ' 另: ' + notes.join(' ') : '') +
           '（enforce 模式：请修正依赖方向后继续）',
       });
-    } else if (archHit || pollNote) {
+    } else if (archHit || notes.length) {
       writeHookOutput('PostToolUse',
-        [archHit && archHit.msg, pollNote].filter(Boolean).join('\n'));
+        [archHit && archHit.msg].concat(notes).filter(Boolean).join('\n'));
     }
   } catch (e) {
     // 嗅探失败 = 静默通过，绝不阻塞写文件

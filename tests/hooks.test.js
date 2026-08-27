@@ -159,3 +159,40 @@ test('watcher(enforce): 轮询提醒不升级为 block（只有架构违规才 b
   assert.equal(out.decision, undefined, '轮询提醒不应产生 decision:block');
   assert.match(out.hookSpecificOutput.additionalContext, /状态同步提醒/);
 });
+
+// ---------- 日志串联嗅探（缺追踪 ID 提醒） ----------
+
+test('watcher: service 层日志调用无追踪 ID → 输出日志串联提醒', () => {
+  const f = writeFixture('src/services/order.ts',
+    "export function create(o: Order) {\n  logger.info('order created', { orderId: o.id });\n}\n");
+  const r = run('arch-watcher.js', {}, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.match(out.hookSpecificOutput.additionalContext, /日志串联提醒/);
+});
+
+test('watcher: 日志调用带 requestId → 静默', () => {
+  const f = writeFixture('src/services/order2.ts',
+    "export function create(o: Order) {\n  logger.info('order created', { orderId: o.id, requestId: o.reqId });\n}\n");
+  const r = run('arch-watcher.js', {}, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout, '');
+});
+
+test('watcher: domain 层日志无 ID → 静默（领域层豁免，上下文应注入在调用方）', () => {
+  const f = writeFixture('src/domain/rule.ts',
+    "export function calc(x: number) {\n  console.log('calc', x);\n  return x * 2;\n}\n");
+  const r = run('arch-watcher.js', {}, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout, '');
+});
+
+test('watcher(enforce): 日志缺 ID 提醒不升级为 block', () => {
+  const f = writeFixture('src/services/billing.ts',
+    "export function charge(c: Card) {\n  logger.warn('charge failed');\n}\n");
+  const r = run('arch-watcher.js', { ARCH_CHECK_WATCHER: 'enforce' }, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.equal(out.decision, undefined, '日志提醒不应产生 decision:block');
+  assert.match(out.hookSpecificOutput.additionalContext, /日志串联提醒/);
+});

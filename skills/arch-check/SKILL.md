@@ -35,6 +35,10 @@ license: MIT
 - **长耗时任务状态同步**：步骤完成必须有显式信号（终态字段 / 事务提交后的事件），
   **"数据库里出现某数据" ≠ "该步骤执行完了"**；多实例同时监听状态时必须有
   原子认领或幂等保护。详见"状态同步专项"。
+- **日志串联与来源标识**：在线流程的日志必须通过 ID 串联——请求链路带
+  `request_id`，涉及用户带 `user_id`，涉及企业/多租户带 `tenant_id`（或
+  `enterprise_id`）；入口一次性注入日志上下文，异步边界显式延续。
+  详见"日志串联专项"。
 - **跟随现状**：新代码与既有分层命名/目录结构冲突时，优先质疑新代码。
 
 ## 第 1 步：圈定变更范围
@@ -60,6 +64,10 @@ git diff [--staged] -- <file>   # 逐文件细看（只看新增/修改的 impor
 5. **状态同步触发**：变更涉及长耗时任务（异步任务、多步骤流水线、worker、
    定时轮询、事件/消息订阅）或引入/修改状态字段（status/state/phase 列、
    完成标记）时，转"状态同步专项"逐条检查。
+6. **日志串联触发**：变更涉及日志调用（logger/log/logging/console.*）、
+   请求入口（controller/handler/middleware/路由）、跨服务 HTTP 调用、
+   消息队列生产/消费、异步任务，或涉及登录态/租户上下文的代码时，
+   转"日志串联专项"逐条检查。
 
 ### 状态同步专项：长耗时任务的竞态与中间态
 
@@ -112,6 +120,60 @@ git diff [--staged] -- <file>   # 逐文件细看（只看新增/修改的 impor
            if claimed.rowcount == 1: ship(order)              # 抢到才执行
 ```
 
+### 日志串联专项：在线流程的可追踪性
+
+**核心要求：在线流程的日志必须通过 ID 串联起来，能明确标识来源**——
+请求链路带 `request_id`；涉及用户带 `user_id`；涉及企业（多租户）带
+`tenant_id` 或 `enterprise_id`。缺了任何一个，排查时链路就断了。
+
+**触发专项时，对变更涉及的日志调用与上下文传递逐问检查：**
+
+**问 1：请求链路的日志带 request_id 了吗？**
+- 入口（网关/中间件/首个 handler）必须生成或透传 request_id：
+  上游有 `X-Request-Id` 就透传，没有就生成——然后**一次性注入日志上下文**
+  （MDC / AsyncLocalStorage / logger context），此后全链路自动携带。
+- BLOCKER：新代码在请求处理路径上打日志，但根本没带 request_id。
+- WARN：request_id 靠"方法参数层层手工传递"——必丢，应改为上下文注入。
+- 跨边界透传：出站 HTTP 调用带 `X-Request-Id` header；消息生产把 id
+  放进消息体/属性。
+
+**问 2：涉及用户的日志带 user_id 了吗？**
+- 从认证上下文/会话取（入口注入日志上下文），不靠每个调用点手工拼。
+- 涉及用户操作的日志缺 user_id = WARN：无法定位"是谁干的"。
+
+**问 3：多租户场景带 tenant_id / enterprise_id 了吗？**
+- 数据按租户隔离的系统，业务日志必须带 `tenant_id`（或团队用的
+  `enterprise_id`——以项目契约/既有日志为准，保持命名一致）。
+- 缺失 = WARN（跨租户排查无从下手）；租户隔离的关键路径缺失可升 BLOCKER。
+
+**问 4：异步边界延续了吗？**
+- 消息队列消费、定时任务、线程池/协程切换处，日志上下文会**丢**——
+  触发源的 request_id/user_id/tenant_id 必须随任务载荷或消息属性显式传递，
+  消费侧重新注入上下文。
+- 异步任务自己"重新生成一个新 id" = 链路断开 = 违规。
+
+**问 5（顺手护栏）**：ID 该打，凭证不该打——发现日志里输出
+token/密码/密钥时记一条 NOTE（超出架构范围但值得提）。
+
+**示例对照**（检查时的具象参照）：
+
+```
+✗ 反例：
+   logger.info('order created', { orderId });     // 谁？哪次请求？哪个租户？
+   http.post(url, body);                          // 下游日志链路断了
+
+✓ 正例：
+   // 入口中间件（一次性注入，全链路自动携带）：
+   const ctx = { requestId: req.header('x-request-id') || genId(),
+                 userId: session.userId, tenantId: session.tenantId };
+   runWithLoggerContext(ctx, () => next());       // MDC / AsyncLocalStorage
+
+   logger.info('order created', { orderId });     // 输出自带三个 ID
+
+   // 异步边界：ctx 随载荷传递，消费侧 rehydrate 恢复上下文
+   await queue.publish('orders.created', { ...event, _ctx: ctx });
+```
+
 ## 第 3 步：输出报告
 
 格式（每条违规一行，按严重度分组）：
@@ -124,10 +186,13 @@ git diff [--staged] -- <file>   # 逐文件细看（只看新增/修改的 impor
 
 严重度标准：
 - **BLOCKER**：依赖方向违规、循环依赖、边界泄漏、隐式完成信号（数据出现=完成）、
-  无保护的共享消费（既无认领也无幂等）——不合就不能合入。
+  无保护的共享消费（既无认领也无幂等）、请求路径日志无 request_id——
+  不合就不能合入。
 - **WARN**：跨模块直达内部、过度抽象、现状不一致、暴露中间态但下游暂未消费、
-  事务外发布完成事件——建议改，可带 `arch-debt:` 标记合入。
-- **NOTE**：值得记录但不要求本次处理（如轮询消费建议确认认领/幂等）。
+  事务外发布完成事件、request_id 靠层层手工传参、涉用户日志缺 user_id、
+  多租户日志缺 tenant_id、异步边界日志上下文丢失——建议改，可带 `arch-debt:` 标记合入。
+- **NOTE**：值得记录但不要求本次处理（如轮询消费建议确认认领/幂等、
+  日志中出现敏感凭证）。
 
 报告末尾一行总结：`N blockers, M warnings, K notes`。
 无违规时输出 `✓ 架构检查通过（按 <契约来源>）`，不要制造问题。
