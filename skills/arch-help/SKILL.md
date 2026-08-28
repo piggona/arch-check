@@ -14,6 +14,7 @@ description: >
 | `/arch-check [staged\|branch\|<range>]` | 变更后架构检查（默认 staged） |
 | `/arch-audit` | 全库架构审计，产出健康报告 |
 | `/arch-debt` | 收割 `arch-debt:` 标记 → 架构债台账 |
+| `/handoff [feature\|bugfix\|script]` | 对话结束后生成交付文档（自动判断任务类型） |
 | `/arch-help` | 本速查 |
 
 ## 规则来源优先级

@@ -1,0 +1,2 @@
+description = "生成交付文档（自动判断任务类型：feature/bugfix/script）"
+prompt = "按 skills/handoff/SKILL.md 的流程生成本次对话的交付文档。类型：{{args}}（未指定则自动判断）。第 1 步判断任务类型，第 2 步从对话历史和 git 状态收集信息，第 3 步按对应模板（feature 需求开发 / bugfix Bug 修复 / script 小工具脚本）输出完整 Markdown。信息不足时追问用户。输出到终端，如用户要求保存则写到 docs/handoff/ 目录。"
