@@ -150,6 +150,33 @@ function sniffLogTrace(source, layer) {
   return null;
 }
 
+// ---------- 数据库访问嗅探：SELECT * 与裸 SQL 简单操作 ----------
+// SELECT * 是确定性文本违规 → 可 enforce block；
+// 裸 SQL 的 INSERT/UPDATE/DELETE/CREATE TABLE/ALTER TABLE 只温和提醒
+// （单文件判断不了项目是否有 ORM、该语句是否属于合理的复杂查询例外）。
+// 注意：count(*) 合法，不会被 SELECT_STAR_RE 误伤（select 与 * 之间需空白）。
+const SELECT_STAR_RE = /select\s+\*/i;
+const RAW_DML_RE = /\b(insert\s+into|update\s+[\w."`\[\]]+\s+set|delete\s+from|create\s+table|alter\s+table)\b/i;
+
+function sniffSqlUsage(source) {
+  // hard: 确定性违规（SELECT *），enforce 档可 block
+  // note: 仅提醒（裸 DML/DDL——单文件判断不了项目是否有 ORM、
+  //       该语句是否属于合理的批量优化例外）
+  let hard = null;
+  let note = null;
+  if (SELECT_STAR_RE.test(source)) {
+    hard = '数据库访问违规[使用 SELECT *] — 原生 SQL 必须显式列出字段，' +
+      '禁止 SELECT *（含 table.*）：表加列即隐式行为变更、破坏覆盖索引、' +
+      '按列序取值直接错位。详见 /arch-check 数据库访问专项。误报则忽略。';
+  }
+  if (RAW_DML_RE.test(source)) {
+    note = '数据库访问提醒[原生 SQL 简单操作] — 建表/增/删/改等简单操作应优先走' +
+      'ORM（migration + 模型）；确属合理例外（批量优化、复杂查询）请注明理由并' +
+      '集中在 infra/DAO 层。详见 /arch-check 数据库访问专项。';
+  }
+  return { hard, note };
+}
+
 // ---------- 主流程 ----------
 if (config.watcher === 'off') process.exit(0);
 
@@ -165,21 +192,24 @@ readHookInput((event) => {
 
     const layer = detectLayer(filePath);
     const archHit = checkFile(filePath, source);   // 架构违规（可 enforce）
+    const sql = sniffSqlUsage(source);             // SELECT * 违规（可 enforce）+ 裸 DML 提醒
     const notes = [
       sniffPollingConsumer(source),                // 状态同步提醒（永不 enforce）
       sniffLogTrace(source, layer),                // 日志串联提醒（永不 enforce）
+      sql.note,                                    // 裸 SQL 提醒（永不 enforce）
     ].filter(Boolean);
 
-    if (config.watcher === 'enforce' && archHit) {
+    const hardHits = [archHit && archHit.msg, sql.hard].filter(Boolean);
+    if (config.watcher === 'enforce' && hardHits.length) {
       writeHookOutput('PostToolUse', null, {
         decision: 'block',
-        reason: archHit.msg +
+        reason: hardHits.join('\n') +
           (notes.length ? ' 另: ' + notes.join(' ') : '') +
-          '（enforce 模式：请修正依赖方向后继续）',
+          '（enforce 模式：请修正后继续）',
       });
-    } else if (archHit || notes.length) {
+    } else if (hardHits.length || notes.length) {
       writeHookOutput('PostToolUse',
-        [archHit && archHit.msg].concat(notes).filter(Boolean).join('\n'));
+        hardHits.concat(notes).filter(Boolean).join('\n'));
     }
   } catch (e) {
     // 嗅探失败 = 静默通过，绝不阻塞写文件

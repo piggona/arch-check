@@ -39,6 +39,9 @@ license: MIT
   `request_id`，涉及用户带 `user_id`，涉及企业/多租户带 `tenant_id`（或
   `enterprise_id`）；入口一次性注入日志上下文，异步边界显式延续。
   详见"日志串联专项"。
+- **数据库访问**：建表与增删改查等简单操作一律走 ORM；确需原生 SQL 的
+  复杂查询集中在数据访问层并**显式列出字段，禁止 `SELECT *`**；
+  无 WHERE 的 UPDATE/DELETE 是事故级违规。详见"数据库访问专项"。
 - **跟随现状**：新代码与既有分层命名/目录结构冲突时，优先质疑新代码。
 
 ## 第 1 步：圈定变更范围
@@ -68,6 +71,9 @@ git diff [--staged] -- <file>   # 逐文件细看（只看新增/修改的 impor
    请求入口（controller/handler/middleware/路由）、跨服务 HTTP 调用、
    消息队列生产/消费、异步任务，或涉及登录态/租户上下文的代码时，
    转"日志串联专项"逐条检查。
+7. **数据库访问触发**：变更涉及数据库代码——ORM 模型/migration、
+   `db.query/execute` 等原生 SQL 调用、SQL 字符串、DAO/repository——时，
+   转"数据库访问专项"逐条检查。
 
 ### 状态同步专项：长耗时任务的竞态与中间态
 
@@ -174,6 +180,51 @@ token/密码/密钥时记一条 NOTE（超出架构范围但值得提）。
    await queue.publish('orders.created', { ...event, _ctx: ctx });
 ```
 
+### 数据库访问专项：ORM 优先与显式字段
+
+**核心要求：关系型数据库的简单操作走 ORM；确需原生 SQL 时显式指定字段，
+禁止 `SELECT *`。**
+
+**触发专项时，对每处数据库访问逐问检查：**
+
+**问 1：简单操作走 ORM 了吗？**
+- 建表（DDL/migration）、INSERT、UPDATE、DELETE、单表查询等简单操作
+  必须通过项目选定的 ORM（SQLAlchemy / Django ORM / TypeORM / Prisma /
+  MyBatis / JPA / GORM……以项目契约为准）。
+- 裸 SQL 做简单操作 = WARN：绕过模型的字段校验、类型映射与审计钩子，
+  schema 变更时无人保护，且散落在业务代码里无人统一评审。
+- 合理例外（允许，但要点名理由、集中在 infra/DAO 层）：多表 JOIN、
+  窗口函数、CTE 报表、ORM 表达不了的批量优化
+  （`INSERT ... ON CONFLICT` 大批量、`RETURNING` 等）——记 NOTE 即可。
+
+**问 2：原生 SQL 有没有 SELECT *？**
+- 任何原生 SQL **禁止 `SELECT *`**（含 `table.*`），必须显式列出字段 = WARN。
+- 为什么：表加列即隐式行为变更（意外拉取大字段、宽表全量传输）；
+  破坏覆盖索引优化；按列序取值的代码直接错位；review 时看不出
+  实际用了哪些字段。
+- ORM 等价行为顺带检查：`findMany()` 不带 `select`、`.all()` 全字段拉取
+  大表 = NOTE，建议按需取列。`count(*)` 不在此列（合法）。
+
+**问 3：写操作的安全性（顺手，事故级）**
+- 无 WHERE 的 UPDATE/DELETE = **BLOCKER**——全表覆写/清空。
+- 多语句数据变更是否包在事务里（与"状态同步专项"联动：
+  数据与终态同一事务）。
+
+**示例对照**（检查时的具象参照）：
+
+```
+✗ 反例：
+   db.execute("CREATE TABLE users (...)")           // 建表不走 migration/ORM
+   db.execute("INSERT INTO orders VALUES (...)")    // 简单插入裸 SQL
+   db.query("SELECT * FROM orders WHERE id = ?")    // SELECT *
+   db.query("SELECT o.*, u.* FROM orders o JOIN ...")  // table.* 同罪
+
+✓ 正例：
+   await prisma.order.create({ data: {...} })                       // 简单操作走 ORM
+   await db.query("SELECT o.id, o.amount, u.name FROM orders o " +  // 复杂查询：
+                  "JOIN users u ON u.id = o.user_id WHERE ...")     //   显式字段
+```
+
 ## 第 3 步：输出报告
 
 格式（每条违规一行，按严重度分组）：
@@ -186,13 +237,14 @@ token/密码/密钥时记一条 NOTE（超出架构范围但值得提）。
 
 严重度标准：
 - **BLOCKER**：依赖方向违规、循环依赖、边界泄漏、隐式完成信号（数据出现=完成）、
-  无保护的共享消费（既无认领也无幂等）、请求路径日志无 request_id——
-  不合就不能合入。
+  无保护的共享消费（既无认领也无幂等）、请求路径日志无 request_id、
+  无 WHERE 的 UPDATE/DELETE——不合就不能合入。
 - **WARN**：跨模块直达内部、过度抽象、现状不一致、暴露中间态但下游暂未消费、
   事务外发布完成事件、request_id 靠层层手工传参、涉用户日志缺 user_id、
-  多租户日志缺 tenant_id、异步边界日志上下文丢失——建议改，可带 `arch-debt:` 标记合入。
+  多租户日志缺 tenant_id、异步边界日志上下文丢失、简单操作绕过 ORM、
+  原生 SQL 使用 SELECT *——建议改，可带 `arch-debt:` 标记合入。
 - **NOTE**：值得记录但不要求本次处理（如轮询消费建议确认认领/幂等、
-  日志中出现敏感凭证）。
+  日志中出现敏感凭证、集中合理使用原生复杂 SQL、ORM 大表全字段拉取）。
 
 报告末尾一行总结：`N blockers, M warnings, K notes`。
 无违规时输出 `✓ 架构检查通过（按 <契约来源>）`，不要制造问题。

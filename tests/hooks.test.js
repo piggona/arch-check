@@ -196,3 +196,67 @@ test('watcher(enforce): 日志缺 ID 提醒不升级为 block', () => {
   assert.equal(out.decision, undefined, '日志提醒不应产生 decision:block');
   assert.match(out.hookSpecificOutput.additionalContext, /日志串联提醒/);
 });
+
+// ---------- 数据库访问嗅探（SELECT * 与裸 SQL） ----------
+
+test('watcher: SELECT * → 输出数据库访问违规提醒', () => {
+  const f = writeFixture('src/infra/repo.ts',
+    "export function getOrder(id: number) {\n  return db.query('SELECT * FROM orders WHERE id = ?', [id]);\n}\n");
+  const r = run('arch-watcher.js', {}, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.match(out.hookSpecificOutput.additionalContext, /SELECT \*/);
+});
+
+test('watcher: 显式字段的原生 SELECT → 静默（合法复杂查询）', () => {
+  const f = writeFixture('src/infra/report.ts',
+    "export function summary() {\n  return db.query('SELECT o.id, o.amount, u.name FROM orders o JOIN users u ON u.id = o.user_id');\n}\n");
+  const r = run('arch-watcher.js', {}, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout, '');
+});
+
+test('watcher: 裸 INSERT INTO → 提醒走 ORM', () => {
+  const f = writeFixture('src/infra/seed.ts',
+    "db.execute(\"INSERT INTO users (name) VALUES ('a')\");\n");
+  const r = run('arch-watcher.js', {}, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.match(out.hookSpecificOutput.additionalContext, /ORM/);
+});
+
+test('watcher: ORM 调用 → 静默', () => {
+  const f = writeFixture('src/infra/order-repo.ts',
+    "export async function getOrder(id: number) {\n  return prisma.order.findUnique({ where: { id }, select: { id: true, amount: true } });\n}\n");
+  const r = run('arch-watcher.js', {}, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout, '');
+});
+
+test('watcher: count(*) 不误伤', () => {
+  const f = writeFixture('src/infra/stats.ts',
+    "const n = await db.query('SELECT count(*) FROM orders');\n");
+  const r = run('arch-watcher.js', {}, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout, '');
+});
+
+test('watcher(enforce): SELECT * 升级为 block（确定性违规）', () => {
+  const f = writeFixture('src/infra/bad.ts',
+    "db.query('SELECT * FROM users');\n");
+  const r = run('arch-watcher.js', { ARCH_CHECK_WATCHER: 'enforce' }, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.equal(out.decision, 'block');
+  assert.match(out.reason, /SELECT \*/);
+});
+
+test('watcher(enforce): 裸 INSERT 只有提醒不 block（可能有合理例外）', () => {
+  const f = writeFixture('src/infra/bulk.ts',
+    "db.execute('INSERT INTO logs (msg) SELECT msg FROM staging');\n");
+  const r = run('arch-watcher.js', { ARCH_CHECK_WATCHER: 'enforce' }, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.equal(out.decision, undefined, '裸 SQL 提醒不应 block');
+  assert.match(out.hookSpecificOutput.additionalContext, /ORM/);
+});
