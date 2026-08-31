@@ -177,6 +177,27 @@ function sniffSqlUsage(source) {
   return { hard, note };
 }
 
+// ---------- 批量数据同步嗅探：循环内逐条写入数据库 ----------
+// 在循环体内检测到单条 INSERT/ORM create/save = 确定性违规，enforce 可 block。
+// 检测策略：源码中同时出现循环模式 + 循环内的单条写入模式。
+// 这里用宽松匹配——实际 AST 分析交给 /arch-check 深查，嗅探只管明显的。
+const LOOP_HEAD_RE = /\bfor\s*\(|\bfor\s+\w+\s+(?:in|of)\b|\bwhile\s*\(|\.forEach\s*\(|\.map\s*\(/;
+// 循环体内逐条写：ORM 单条创建或原生 INSERT（非 bulk/batch/many 系列）
+const SINGLE_INSERT_RE = /\.create\s*\(\s*\{|\.save\s*\(|\.insert\s*\(\s*\{|db\.\s*execute\s*\(\s*['"`]INSERT\b|\.execute\s*\(\s*['"`]INSERT\b|session\.\s*add\s*\(/i;
+// 批量写入的合法关键词——如果也出现了，说明不是逐条（降低误伤）
+const BULK_API_RE = /bulk_create|bulkCreate|createMany|insertMany|bulk_save|executemany|execute_many|COPY\s|LOAD\s+DATA|batch_size|batchSize|BATCH_SIZE|addAll\s*\(|saveAll\s*\(/i;
+
+function sniffLoopInsert(source) {
+  if (!LOOP_HEAD_RE.test(source)) return null;
+  if (!SINGLE_INSERT_RE.test(source)) return null;
+  if (BULK_API_RE.test(source)) return null; // 有批量 API 引用 → 大概率不是逐条
+  return '批量同步违规[循环逐条写入数据库] — 同步/导入数据禁止循环逐条 INSERT/create' +
+    '（N 条 = N 次数据库往返，数据量大即耗时爆炸、连接池耗尽）。' +
+    '应改为分批批量写入（bulk_create/createMany/多行 INSERT），' +
+    '每批控制在 SQL 传输限制以内（常见 500-5000 行一批）。' +
+    '详见 /arch-check 批量数据同步专项。误报则忽略。';
+}
+
 // ---------- 主流程 ----------
 if (config.watcher === 'off') process.exit(0);
 
@@ -193,13 +214,14 @@ readHookInput((event) => {
     const layer = detectLayer(filePath);
     const archHit = checkFile(filePath, source);   // 架构违规（可 enforce）
     const sql = sniffSqlUsage(source);             // SELECT * 违规（可 enforce）+ 裸 DML 提醒
+    const loopInsert = sniffLoopInsert(source);    // 循环逐条写入（可 enforce）
     const notes = [
       sniffPollingConsumer(source),                // 状态同步提醒（永不 enforce）
       sniffLogTrace(source, layer),                // 日志串联提醒（永不 enforce）
       sql.note,                                    // 裸 SQL 提醒（永不 enforce）
     ].filter(Boolean);
 
-    const hardHits = [archHit && archHit.msg, sql.hard].filter(Boolean);
+    const hardHits = [archHit && archHit.msg, sql.hard, loopInsert].filter(Boolean);
     if (config.watcher === 'enforce' && hardHits.length) {
       writeHookOutput('PostToolUse', null, {
         decision: 'block',

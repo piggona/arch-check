@@ -42,6 +42,8 @@ license: MIT
 - **数据库访问**：建表与增删改查等简单操作一律走 ORM；确需原生 SQL 的
   复杂查询集中在数据访问层并**显式列出字段，禁止 `SELECT *`**；
   无 WHERE 的 UPDATE/DELETE 是事故级违规。详见"数据库访问专项"。
+- **批量数据同步**：同步数据到数据库时**禁止循环逐条插入**——必须分批（batch）
+  写入，且每批数据量需控制在 SQL 传输/解析限制以内。详见"批量数据同步专项"。
 - **跟随现状**：新代码与既有分层命名/目录结构冲突时，优先质疑新代码。
 
 ## 第 1 步：圈定变更范围
@@ -74,6 +76,9 @@ git diff [--staged] -- <file>   # 逐文件细看（只看新增/修改的 impor
 7. **数据库访问触发**：变更涉及数据库代码——ORM 模型/migration、
    `db.query/execute` 等原生 SQL 调用、SQL 字符串、DAO/repository——时，
    转"数据库访问专项"逐条检查。
+8. **批量数据同步触发**：变更涉及数据导入/同步/迁移逻辑——从外部源（API、
+   文件、消息队列、另一个库/表）读取数据后写入数据库、循环遍历集合并逐条
+   插入/更新、ETL 管道——时，转"批量数据同步专项"逐条检查。
 
 ### 状态同步专项：长耗时任务的竞态与中间态
 
@@ -225,6 +230,74 @@ token/密码/密钥时记一条 NOTE（超出架构范围但值得提）。
                   "JOIN users u ON u.id = o.user_id WHERE ...")     //   显式字段
 ```
 
+### 批量数据同步专项：禁止循环逐条插入
+
+**核心要求：同步/导入数据到数据库时，数据条数未知、规模未知，一定不能做一个循环
+一条一条插入——必须按块（batch）批量写入，且每批数据量不得超过 SQL 的传输/解析限制。**
+
+**适用信号**：从外部源拉取数据后写入数据库（API 对接、CSV/Excel 导入、跨库同步、
+消息队列批量消费、数据迁移脚本、ETL 管道）；`for`/`for…of`/`while` 循环内包含
+单条 INSERT/UPDATE/`model.create`/`model.save`。
+
+**触发专项时，用 Grep 追踪数据源到写入的完整路径，逐问检查：**
+
+**问 1：是否存在循环逐条写入？**
+- 反模式（**BLOCKER**）：`for item in data_list: db.insert(item)` ——循环里每条
+  数据单独一次 INSERT（或 ORM 的 `.create()` / `.save()`），N 条数据 = N 次
+  数据库往返。数据量一大即耗时爆炸、连接池耗尽、甚至打满数据库。
+- 正确做法：**攒批 → 批量写入**。ORM 用 `createMany` / `bulk_create` /
+  `bulk_save_objects` / `insertMany` / MyBatis `<foreach>`；原生 SQL 用
+  `INSERT INTO ... VALUES (...),(...),(...)` 多行一次或数据库的批量导入 API
+  （`COPY` / `LOAD DATA` / `executemany`）。
+
+**问 2：batch size 有没有控制？**
+- 一次性把不确定数量的全部数据塞进一条 SQL 同样危险——SQL 文本可能超过
+  数据库/驱动的传输限制（MySQL `max_allowed_packet` 默认 4/16/64MB，
+  PostgreSQL 单条 SQL 1GB 但巨大 SQL 解析也极慢，网络层也有 buffer 上限）。
+- 正确做法：按固定批次大小切割（常见 500–5000 行一批，视单行宽度而定），
+  分批提交：`for chunk in chunks(data, BATCH_SIZE): bulk_insert(chunk)`。
+- BATCH_SIZE **必须是可配置常量**，不能硬编码在循环深处无人留意。
+- 如果无法确定合适的 batch size，给出保守默认值并加注释说明选择依据
+  （如"单行约 200 bytes，500 行 ≈ 100KB，远低于默认 max_allowed_packet"）。
+
+**问 3：事务与错误处理是否合理？**
+- 每批一个事务（而非全量一个超大事务——锁持有时间过长、undo log 膨胀）。
+- 某批失败时应有重试/跳过/记录策略，不能"半成功半失败"无人知晓。
+- 与"状态同步专项"联动：如果后续有消费方依赖同步结果，**同步完成后须有
+  显式的完成信号**——禁止消费方以"数据出现"判断同步完毕。
+
+**示例对照**（检查时的具象参照）：
+
+```
+✗ 反例：循环逐条插入（N 条 = N 次网络往返）
+   for item in api_response['items']:
+       db.execute("INSERT INTO products (name, price) VALUES (?, ?)",
+                  (item['name'], item['price']))
+
+✗ 反例：一次性全量塞进一条 SQL（数据量大时超 max_allowed_packet）
+   values = ", ".join(f"('{i['name']}', {i['price']})" for i in items)
+   db.execute(f"INSERT INTO products (name, price) VALUES {values}")
+
+✓ 正例：分批批量插入，每批控制大小
+   BATCH_SIZE = 500  # 单行约 200B，500 行 ≈ 100KB，远低于 max_allowed_packet
+   for chunk in chunks(items, BATCH_SIZE):
+       with db.transaction():
+           db.execute_many(
+               "INSERT INTO products (name, price) VALUES (?, ?)",
+               [(i['name'], i['price']) for i in chunk]
+           )
+   # 全量同步完成后置终态（与状态同步专项联动）
+   db.execute("UPDATE sync_jobs SET status='completed' WHERE id=?", job_id)
+
+✓ 正例（ORM）：
+   BATCH_SIZE = 500
+   for chunk in chunks(items, BATCH_SIZE):
+       Product.objects.bulk_create(
+           [Product(name=i['name'], price=i['price']) for i in chunk],
+           batch_size=BATCH_SIZE,
+       )
+```
+
 ## 第 3 步：输出报告
 
 格式（每条违规一行，按严重度分组）：
@@ -238,11 +311,13 @@ token/密码/密钥时记一条 NOTE（超出架构范围但值得提）。
 严重度标准：
 - **BLOCKER**：依赖方向违规、循环依赖、边界泄漏、隐式完成信号（数据出现=完成）、
   无保护的共享消费（既无认领也无幂等）、请求路径日志无 request_id、
-  无 WHERE 的 UPDATE/DELETE——不合就不能合入。
+  无 WHERE 的 UPDATE/DELETE、**循环逐条写入数据库（已知为批量同步场景）**——
+  不合就不能合入。
 - **WARN**：跨模块直达内部、过度抽象、现状不一致、暴露中间态但下游暂未消费、
   事务外发布完成事件、request_id 靠层层手工传参、涉用户日志缺 user_id、
   多租户日志缺 tenant_id、异步边界日志上下文丢失、简单操作绕过 ORM、
-  原生 SQL 使用 SELECT *——建议改，可带 `arch-debt:` 标记合入。
+  原生 SQL 使用 SELECT *、**批量写入未控制 batch size 或未按批提交事务**——
+  建议改，可带 `arch-debt:` 标记合入。
 - **NOTE**：值得记录但不要求本次处理（如轮询消费建议确认认领/幂等、
   日志中出现敏感凭证、集中合理使用原生复杂 SQL、ORM 大表全字段拉取）。
 

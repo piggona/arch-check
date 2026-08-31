@@ -29,17 +29,24 @@
    确需原生 SQL 的复杂查询（JOIN/窗口/CTE/批量优化）集中在 infra/DAO 层，
    **显式列出字段，禁止 `SELECT *`（含 `table.*`）**；
    ORM 大表查询按需 select 字段；无 WHERE 的 UPDATE/DELETE 是事故级违规。
-9. **跟随现状**：新代码与既有分层结构冲突时，先质疑新代码。
+9. **批量数据同步**：同步/导入数据到数据库时**禁止循环逐条插入**——
+   N 条数据 = N 次数据库往返，数据量一大即耗时爆炸、连接池耗尽。
+   必须分批（batch）批量写入（`bulk_create`/`createMany`/多行 INSERT/`COPY`），
+   每批大小可配置且不超过 SQL 传输限制（MySQL `max_allowed_packet`、
+   网络 buffer 等）；每批一个事务，某批失败有重试/记录策略。
+10. **跟随现状**：新代码与既有分层结构冲突时，先质疑新代码。
 
 ## 检查输出
 
 `<file>:<line> [BLOCKER|WARN|NOTE] <规则> — <问题> → <最小修复建议>`
 
 - BLOCKER：方向违规、循环依赖、边界泄漏、隐式完成信号、无保护的共享消费、
-  请求路径日志无 request_id、无 WHERE 的 UPDATE/DELETE，不合不能合入
+  请求路径日志无 request_id、无 WHERE 的 UPDATE/DELETE、
+  循环逐条写入数据库（批量同步场景），不合不能合入
 - WARN：直达内部、过度抽象、与现状不一致、暴露中间态、事务外发事件、
   涉用户日志缺 user_id、多租户日志缺 tenant_id、异步边界上下文丢失、
-  简单操作绕过 ORM、原生 SQL 用 SELECT *，可带标记合入
+  简单操作绕过 ORM、原生 SQL 用 SELECT *、批量写入未控制 batch size，
+  可带标记合入
 - NOTE：记录在案，不要求本次处理
 
 暂缓修复的 WARN 在代码处标记：

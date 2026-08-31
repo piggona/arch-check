@@ -36,7 +36,7 @@ infra/          12      DB/HTTP 适配
 
 识别不出分层的仓库：如实说"未发现显式分层"，按模块（顶级目录）审计耦合。
 
-## 第 2 步：七项审计
+## 第 2 步：八项审计
 
 对每项都要给出**证据**（文件:行），没有证据的结论不要写。
 
@@ -59,6 +59,12 @@ infra/          12      DB/HTTP 适配
    mapper XML），与 ORM 调用统计占比；`SELECT *`（含 `table.*`）命中清单；
    原生 SQL 是否集中在 infra/DAO 层还是散落业务代码；无 WHERE 的
    UPDATE/DELETE 扫描。详细判定标准见 arch-check 技能的"数据库访问专项"。
+8. **批量数据同步**：搜索数据导入/同步/迁移相关的代码路径（ETL 脚本、
+   sync/import 模块、消息批量消费、数据迁移），检查是否存在循环逐条 INSERT/
+   UPDATE/`.create()`/`.save()`；已用批量写入的检查 batch size 是否可配置、
+   是否有超 SQL 传输限制的风险（单行宽度 × batch size 是否远小于
+   `max_allowed_packet` 或等效限制）、是否按批提交事务。
+   详细判定标准见 arch-check 技能的"批量数据同步专项"。
 
 ## 第 3 步：输出报告
 

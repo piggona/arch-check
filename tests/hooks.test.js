@@ -260,3 +260,49 @@ test('watcher(enforce): 裸 INSERT 只有提醒不 block（可能有合理例外
   assert.equal(out.decision, undefined, '裸 SQL 提醒不应 block');
   assert.match(out.hookSpecificOutput.additionalContext, /ORM/);
 });
+
+// ---------- 批量数据同步嗅探（循环逐条写入） ----------
+
+test('watcher: for 循环内 db.execute INSERT → 输出批量同步违规', () => {
+  const f = writeFixture('src/services/sync.ts',
+    "for (const item of items) {\n  db.execute('INSERT INTO products (name) VALUES (?)', [item.name]);\n}\n");
+  const r = run('arch-watcher.js', {}, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.match(out.hookSpecificOutput.additionalContext, /批量同步违规|循环逐条/);
+});
+
+test('watcher: for 循环内 ORM .create() → 输出批量同步违规', () => {
+  const f = writeFixture('src/services/importer.ts',
+    "for (const row of csvRows) {\n  await prisma.product.create({ data: { name: row.name } });\n}\n");
+  const r = run('arch-watcher.js', {}, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.match(out.hookSpecificOutput.additionalContext, /批量同步违规|循环逐条/);
+});
+
+test('watcher: 使用 bulk_create/createMany → 静默（合法批量写入）', () => {
+  const f = writeFixture('src/services/bulk-sync.ts',
+    "for (const chunk of chunks(items, BATCH_SIZE)) {\n  await prisma.product.createMany({ data: chunk });\n}\n");
+  const r = run('arch-watcher.js', {}, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout, '');
+});
+
+test('watcher: 无循环的单条 create → 静默（非批量同步场景）', () => {
+  const f = writeFixture('src/services/order.ts',
+    "export async function placeOrder(data: OrderInput) {\n  return prisma.order.create({ data });\n}\n");
+  const r = run('arch-watcher.js', {}, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout, '');
+});
+
+test('watcher(enforce): 循环逐条写入升级为 block', () => {
+  const f = writeFixture('src/services/sync-bad.py',
+    "for item in api_data:\n    session.add(Product(name=item['name']))\n    session.commit()\n");
+  const r = run('arch-watcher.js', { ARCH_CHECK_WATCHER: 'enforce' }, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.equal(out.decision, 'block');
+  assert.match(out.reason, /批量同步|循环逐条/);
+});

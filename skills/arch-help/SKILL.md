@@ -26,7 +26,9 @@ description: >
    日志串联与来源标识——在线请求带 request_id、涉用户带 user_id、
    涉企业带 tenant_id/enterprise_id，入口注入日志上下文、异步边界显式延续；
    数据库访问——简单操作（建表/增删改查）走 ORM，原生 SQL 显式字段、
-   禁止 SELECT *，无 WHERE 的 UPDATE/DELETE 是事故级违规
+   禁止 SELECT *，无 WHERE 的 UPDATE/DELETE 是事故级违规；
+   批量数据同步——禁止循环逐条插入，必须分批批量写入且控制 batch size
+   不超过 SQL 传输限制
 
 ## arch-debt 标记语法
 
@@ -42,7 +44,8 @@ description: >
 - **每次写/改文件后**：轻量嗅探常见违规（分层 import、直捣内部路径、
   轮询式状态消费——提醒确认终态消费与原子认领、日志调用缺追踪 ID——
   提醒补 request_id/user_id/tenant_id、原生 SQL 简单操作与 SELECT *——
-  提醒走 ORM 并显式列出字段）。
+  提醒走 ORM 并显式列出字段、循环内逐条 INSERT/create——
+  提醒改为批量写入并控制 batch size）。
   提醒强度由 `ARCH_CHECK_WATCHER` 控制：`hint`（默认，仅提示）/
   `enforce`（输出阻断提醒，代理会自我修正）/ `off`
 
