@@ -177,6 +177,41 @@ function sniffSqlUsage(source) {
   return { hard, note };
 }
 
+// ---------- 任务超时设计嗅探：缺双窗口超时或阈值硬编码 ----------
+// 检测思路：
+//   hard（可 enforce block）：文件同时出现"任务超时相关词"和"任务开始时间字段"，
+//     但没有出现任何保活字段（last_progress_at / heartbeat_at / progress_timeout…）。
+//     这强烈暗示是单窗口超时实现，会误杀正在推进的大任务。
+//   note（永不 enforce）：超时相关变量对比大数字字面量（可能是硬编码阈值）。
+// 豁免：文件里已经出现保活相关关键词 → 认为已考虑双窗口，静默。
+// 宽松策略：两个独立的 RE 分别测，只要同时命中才触发——而非要求在 120 字符内相邻。
+const TIMEOUT_WORD_RE = /\b(?:timeout|timed_out|time_out|deadline|max_duration|absolute_timeout|elapsed|超时)\b/i;
+const START_TIME_RE   = /\b(?:started_at|start_time|begin_time|create_time|created_at|startedAt|createdAt)\b/i;
+const KEEPALIVE_FIELD_RE = /last_progress(?:_at)?|progress_at|heartbeat_at|heartbeat|keepalive|progress_timeout|progress_ttl|PROGRESS_TIMEOUT/i;
+// 超时阈值硬编码：timeout/deadline 等词附近紧跟比较运算符和大数字（≥3位 = ≥100）
+const HARDCODED_SECONDS_RE = /\b(?:timeout|deadline|ttl|max_duration)\b[^;\n]{0,40}[><=!]{1,2}\s*\d{3,}\b(?!\s*\*)/i;
+
+function sniffTimeoutDesign(source) {
+  let hard = null;
+  let note = null;
+  // 同时检测到超时词 + 任务开始时间字段，但无保活字段 → 单窗口超时
+  if (TIMEOUT_WORD_RE.test(source) && START_TIME_RE.test(source) && !KEEPALIVE_FIELD_RE.test(source)) {
+    hard = '任务超时设计违规[单窗口超时] — 检测到超时判断与任务开始时间比较，' +
+      '但未见保活字段（last_progress_at / heartbeat_at / progress_timeout）：' +
+      '只比较总运行时间会误杀正在推进的大任务。' +
+      '需同时设置总超时（absolute_timeout）和进度保活超时（progress_timeout），' +
+      '超时条件为"总超时到期 AND 保活窗口内无进度"。' +
+      '详见 /arch-check 任务超时设计专项。误报则忽略。';
+  }
+  // 超时阈值硬编码（无保活字段时才提醒，避免双重提醒）
+  if (!hard && HARDCODED_SECONDS_RE.test(source) && TIMEOUT_WORD_RE.test(source)) {
+    note = '任务超时设计提醒[阈值硬编码] — 超时阈值直接写在代码里，' +
+      '应改为从环境变量/配置中心读取（便于不同环境调优）。' +
+      '详见 /arch-check 任务超时设计专项。';
+  }
+  return { hard, note };
+}
+
 // ---------- 批量数据同步嗅探：循环内逐条写入数据库 ----------
 // 在循环体内检测到单条 INSERT/ORM create/save = 确定性违规，enforce 可 block。
 // 检测策略：源码中同时出现循环模式 + 循环内的单条写入模式。
@@ -215,13 +250,15 @@ readHookInput((event) => {
     const archHit = checkFile(filePath, source);   // 架构违规（可 enforce）
     const sql = sniffSqlUsage(source);             // SELECT * 违规（可 enforce）+ 裸 DML 提醒
     const loopInsert = sniffLoopInsert(source);    // 循环逐条写入（可 enforce）
+    const timeoutSniff = sniffTimeoutDesign(source); // 单窗口超时（可 enforce）+ 阈值硬编码提醒
     const notes = [
       sniffPollingConsumer(source),                // 状态同步提醒（永不 enforce）
       sniffLogTrace(source, layer),                // 日志串联提醒（永不 enforce）
       sql.note,                                    // 裸 SQL 提醒（永不 enforce）
+      timeoutSniff.note,                           // 超时阈值硬编码提醒（永不 enforce）
     ].filter(Boolean);
 
-    const hardHits = [archHit && archHit.msg, sql.hard, loopInsert].filter(Boolean);
+    const hardHits = [archHit && archHit.msg, sql.hard, loopInsert, timeoutSniff.hard].filter(Boolean);
     if (config.watcher === 'enforce' && hardHits.length) {
       writeHookOutput('PostToolUse', null, {
         decision: 'block',

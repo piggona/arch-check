@@ -28,7 +28,10 @@ description: >
    数据库访问——简单操作（建表/增删改查）走 ORM，原生 SQL 显式字段、
    禁止 SELECT *，无 WHERE 的 UPDATE/DELETE 是事故级违规；
    批量数据同步——禁止循环逐条插入，必须分批批量写入且控制 batch size
-   不超过 SQL 传输限制
+   不超过 SQL 传输限制；
+   长耗时任务超时设计——必须同时设置总超时（absolute_timeout）和进度保活超时
+   （progress_timeout），超时判断为双条件 AND（总超时到期 AND 保活窗口无进度），
+   进度刷新同时更新时间戳+进度计数，阈值从配置读，时间比较统一 UTC
 
 ## arch-debt 标记语法
 
@@ -45,7 +48,8 @@ description: >
   轮询式状态消费——提醒确认终态消费与原子认领、日志调用缺追踪 ID——
   提醒补 request_id/user_id/tenant_id、原生 SQL 简单操作与 SELECT *——
   提醒走 ORM 并显式列出字段、循环内逐条 INSERT/create——
-  提醒改为批量写入并控制 batch size）。
+  提醒改为批量写入并控制 batch size、超时逻辑缺保活判断或阈值硬编码——
+  提醒补双窗口超时设计）。
   提醒强度由 `ARCH_CHECK_WATCHER` 控制：`hint`（默认，仅提示）/
   `enforce`（输出阻断提醒，代理会自我修正）/ `off`
 

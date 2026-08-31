@@ -44,6 +44,10 @@ license: MIT
   无 WHERE 的 UPDATE/DELETE 是事故级违规。详见"数据库访问专项"。
 - **批量数据同步**：同步数据到数据库时**禁止循环逐条插入**——必须分批（batch）
   写入，且每批数据量需控制在 SQL 传输/解析限制以内。详见"批量数据同步专项"。
+- **长耗时任务超时设计**：持续执行且有可查询进度的任务（数据同步、批量处理、
+  导入导出等），必须同时设置**总超时（absolute timeout）**和**进度保活超时
+  （progress timeout）**，并在超时判断时区分"整体卡死"与"仍在推进"。
+  详见"任务超时设计专项"。
 - **跟随现状**：新代码与既有分层命名/目录结构冲突时，优先质疑新代码。
 
 ## 第 1 步：圈定变更范围
@@ -79,6 +83,10 @@ git diff [--staged] -- <file>   # 逐文件细看（只看新增/修改的 impor
 8. **批量数据同步触发**：变更涉及数据导入/同步/迁移逻辑——从外部源（API、
    文件、消息队列、另一个库/表）读取数据后写入数据库、循环遍历集合并逐条
    插入/更新、ETL 管道——时，转"批量数据同步专项"逐条检查。
+9. **任务超时设计触发**：变更涉及长耗时异步任务——job/worker/task executor、
+   数据同步/导入/导出、定时任务——且代码中有超时判断、deadline 逻辑、
+   任务状态流转（`running/timeout/failed`）、`last_heartbeat`/`progress_at`/
+   `updated_at` 类进度时间戳字段——时，转"任务超时设计专项"逐条检查。
 
 ### 状态同步专项：长耗时任务的竞态与中间态
 
@@ -298,6 +306,99 @@ token/密码/密钥时记一条 NOTE（超出架构范围但值得提）。
        )
 ```
 
+### 任务超时设计专项：双窗口超时（总超时 + 进度保活）
+
+**核心要求：持续执行且有可查询进度的长耗时任务，必须同时设计两个超时维度——**
+- **总超时（absolute_timeout）**：任务从创建/启动到终止的绝对时间上限，
+  防止任务无限运行占用资源（不管有没有进度）。
+- **进度保活超时（progress_timeout / keepalive_window）**：在总超时到达时，
+  若最近一次进度刷新距今在保活窗口内，说明任务仍在推进，**不判超时失败，
+  继续等待**；若保活窗口内也没有进度更新，才将任务置为超时失败状态。
+
+**两个超时缺一不可**：
+- 只有总超时：正常推进中的大任务会被误杀（数据量大时合理耗时超过阈值）。
+- 只有保活超时（没有总超时）：任务可能永久续命，资源无法回收，故障也掩盖了。
+
+**触发专项时，逐问检查：**
+
+**问 1：两个超时是否都定义了？**
+- 必须在任务定义/配置中同时存在 `absolute_timeout`（或 `total_timeout` /
+  `max_duration`）和 `progress_timeout`（或 `keepalive_window` / `progress_ttl`
+  / `heartbeat_timeout`）两个字段——**任意一个缺失 = BLOCKER**。
+- 两个值必须是可配置常量（环境变量 / 配置中心），不得硬编码。
+- `progress_timeout` 必须 **< absolute_timeout**，否则保活逻辑永远不会触发。
+
+**问 2：进度刷新是否真实反映进展？**
+- 任务执行方必须在每完成一个可见进度单元（处理一批数据、完成一个阶段）后
+  **主动刷新**进度时间戳（`last_progress_at` / `heartbeat_at` / `updated_at`），
+  而不是定时心跳刷时间——**定时刷时间 ≠ 有进度**，任务卡死也能续命。
+- 理想做法：同时更新 `progress_at`（时间）和进度值（`processed_count` /
+  `progress_pct` / `cursor` 等），超时判断时可验证进度值是否真的在增长。
+- WARN：只刷新时间戳而不更新进度计数——无法区分"卡死但心跳在"与"正常推进"。
+
+**问 3：超时判断逻辑是否正确实现双窗口？**
+- 超时检查流程（必须同时满足才判超时失败）：
+  ```
+  now > task.started_at + absolute_timeout        # 总超时已到
+  AND now > task.last_progress_at + progress_timeout  # 保活窗口也超了
+  → 置为 timeout/failed
+  ```
+- 反模式（BLOCKER）：只检查 `now > started_at + some_timeout`，没有保活判断——
+  大任务正常推进时被误杀。
+- 反模式（BLOCKER）：超时判断逻辑与进度刷新不在同一时区/时钟源——
+  `last_progress_at` 用 UTC 但比较时用本地时间，或 worker 与 scheduler
+  在不同机器上时间未同步。时间比较必须统一用 UTC 并来自同一时钟源。
+- WARN：超时阈值从代码里读（`if elapsed > 3600:`），应改为从配置读。
+
+**问 4：超时后的处置是否合理？**
+- 超时失败的任务必须有**终态**（`timeout` / `failed`），并记录超时原因
+  （是总超时到期还是保活超时——方便排查是任务逻辑卡死还是数据量太大）。
+- 与"状态同步专项"联动：`timeout` 也是终态，下游消费方只消费终态，
+  超时任务不应卡在 `running` 里让下游以为仍在执行。
+- 超时任务的重试策略：是自动重试还是人工介入？重试时 `started_at` 必须重置。
+
+**示例对照**（检查时的具象参照）：
+
+```
+✗ 反例 1：只有一个超时，正在推进的任务被误杀
+   # 只检查总运行时间，不管有没有进度
+   if now - job.started_at > TASK_TIMEOUT:
+       job.status = 'timeout'           # 大任务正常推进时冤死
+
+✗ 反例 2：用定时心跳刷新时间，任务卡死也续命
+   # worker 每 30s 更新一次时间，无论有没有实际进度
+   schedule.every(30).seconds.do(lambda: job.update(last_heartbeat=now()))
+   # 判断时只看心跳时间 → 卡死的任务永远不超时
+
+✗ 反例 3：缺少总超时，任务可以永久续命
+   if now - job.last_progress_at > PROGRESS_TIMEOUT:
+       job.status = 'timeout'           # 只要每隔一段时间有点进展就永远不超时
+
+✓ 正例：双窗口超时 + 真实进度计数刷新
+   # 任务配置（可配置）
+   ABSOLUTE_TIMEOUT = int(os.getenv('TASK_ABSOLUTE_TIMEOUT', 7200))   # 2 小时
+   PROGRESS_TIMEOUT = int(os.getenv('TASK_PROGRESS_TIMEOUT', 300))    # 5 分钟无进展
+
+   # 任务执行方：每处理一批时同时刷新时间 + 进度计数
+   def process_batch(job, batch):
+       do_sync(batch)
+       job.update(
+           last_progress_at=utcnow(),
+           processed_count=job.processed_count + len(batch),  # 进度计数必须增长
+       )
+
+   # 超时检查方（scheduler / monitor）：双条件 AND
+   def check_timeout(job):
+       now = utcnow()
+       total_expired  = (now - job.started_at).seconds  > ABSOLUTE_TIMEOUT
+       no_progress    = (now - job.last_progress_at).seconds > PROGRESS_TIMEOUT
+       if total_expired and no_progress:
+           job.update(status='timeout',
+                      timeout_reason='no_progress')       # 区分超时原因
+       elif total_expired and not no_progress:
+           pass  # 总超时已到但仍有进展 → 继续等待
+```
+
 ## 第 3 步：输出报告
 
 格式（每条违规一行，按严重度分组）：
@@ -311,12 +412,15 @@ token/密码/密钥时记一条 NOTE（超出架构范围但值得提）。
 严重度标准：
 - **BLOCKER**：依赖方向违规、循环依赖、边界泄漏、隐式完成信号（数据出现=完成）、
   无保护的共享消费（既无认领也无幂等）、请求路径日志无 request_id、
-  无 WHERE 的 UPDATE/DELETE、**循环逐条写入数据库（已知为批量同步场景）**——
-  不合就不能合入。
+  无 WHERE 的 UPDATE/DELETE、循环逐条写入数据库（已知为批量同步场景）、
+  **长耗时任务只有一个超时维度（缺总超时或缺进度保活超时）**、
+  **超时判断逻辑用单条件（没有保活判断）或存在时钟不一致**——不合就不能合入。
 - **WARN**：跨模块直达内部、过度抽象、现状不一致、暴露中间态但下游暂未消费、
   事务外发布完成事件、request_id 靠层层手工传参、涉用户日志缺 user_id、
   多租户日志缺 tenant_id、异步边界日志上下文丢失、简单操作绕过 ORM、
-  原生 SQL 使用 SELECT *、**批量写入未控制 batch size 或未按批提交事务**——
+  原生 SQL 使用 SELECT *、批量写入未控制 batch size 或未按批提交事务、
+  **超时阈值硬编码在代码里（应改为可配置）**、
+  **进度刷新只更新时间戳而不更新进度计数（无法区分卡死与推进）**——
   建议改，可带 `arch-debt:` 标记合入。
 - **NOTE**：值得记录但不要求本次处理（如轮询消费建议确认认领/幂等、
   日志中出现敏感凭证、集中合理使用原生复杂 SQL、ORM 大表全字段拉取）。

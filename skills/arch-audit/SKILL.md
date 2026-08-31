@@ -36,7 +36,7 @@ infra/          12      DB/HTTP 适配
 
 识别不出分层的仓库：如实说"未发现显式分层"，按模块（顶级目录）审计耦合。
 
-## 第 2 步：八项审计
+## 第 2 步：九项审计
 
 对每项都要给出**证据**（文件:行），没有证据的结论不要写。
 
@@ -65,6 +65,13 @@ infra/          12      DB/HTTP 适配
    是否有超 SQL 传输限制的风险（单行宽度 × batch size 是否远小于
    `max_allowed_packet` 或等效限制）、是否按批提交事务。
    详细判定标准见 arch-check 技能的"批量数据同步专项"。
+9. **任务超时设计**：搜索长耗时任务相关代码（job/worker/task 模块、timeout/
+   deadline 字段、状态置为 `timeout`/`failed` 的逻辑），检查每个长耗时任务是否
+   同时定义了总超时（`absolute_timeout`/`total_timeout`/`max_duration`）和进度
+   保活超时（`progress_timeout`/`keepalive_window`/`heartbeat_timeout`）；
+   超时判断是否为双条件 AND（总超时到 AND 保活窗口内无进度）；进度刷新是否同时
+   更新时间戳和进度计数；超时阈值是否从配置读取；时间比较是否统一 UTC 时钟。
+   详细判定标准见 arch-check 技能的"任务超时设计专项"。
 
 ## 第 3 步：输出报告
 

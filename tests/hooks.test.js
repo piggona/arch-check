@@ -306,3 +306,52 @@ test('watcher(enforce): 循环逐条写入升级为 block', () => {
   assert.equal(out.decision, 'block');
   assert.match(out.reason, /批量同步|循环逐条/);
 });
+
+// ---------- 任务超时设计嗅探（双窗口超时） ----------
+
+test('watcher: 超时判断只检查 started_at 无保活字段 → 输出单窗口超时违规', () => {
+  const f = writeFixture('src/services/task-monitor.ts',
+    "if (now - job.started_at > TIMEOUT) {\n  job.status = 'timeout';\n}\n");
+  const r = run('arch-watcher.js', {}, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.match(out.hookSpecificOutput.additionalContext, /单窗口超时|保活/);
+});
+
+test('watcher: 超时判断包含 last_progress_at → 静默（双窗口已实现）', () => {
+  const f = writeFixture('src/services/task-monitor2.ts',
+    "const totalExpired = now - job.started_at > ABSOLUTE_TIMEOUT;\n" +
+    "const noProgress = now - job.last_progress_at > PROGRESS_TIMEOUT;\n" +
+    "if (totalExpired && noProgress) { job.status = 'timeout'; }\n");
+  const r = run('arch-watcher.js', {}, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout, '');
+});
+
+test('watcher: 超时判断包含 heartbeat_at → 静默（保活字段存在）', () => {
+  const f = writeFixture('src/services/task-monitor3.ts',
+    "if (now - job.started_at > timeout && now - job.heartbeat_at > keepalive) {\n  fail(job);\n}\n");
+  const r = run('arch-watcher.js', {}, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout, '');
+});
+
+test('watcher(enforce): 单窗口超时升级为 block', () => {
+  const f = writeFixture('src/services/task-monitor-bad.py',
+    "if (now - task.started_at).seconds > MAX_DURATION:\n    task.status = 'timeout'\n");
+  const r = run('arch-watcher.js', { ARCH_CHECK_WATCHER: 'enforce' }, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.equal(out.decision, 'block');
+  assert.match(out.reason, /单窗口超时|保活/);
+});
+
+test('watcher(enforce): 双窗口超时不误 block', () => {
+  const f = writeFixture('src/services/task-ok.py',
+    "total_expired = (now - task.started_at).seconds > ABSOLUTE_TIMEOUT\n" +
+    "no_progress = (now - task.last_progress_at).seconds > PROGRESS_TIMEOUT\n" +
+    "if total_expired and no_progress:\n    task.status = 'timeout'\n");
+  const r = run('arch-watcher.js', { ARCH_CHECK_WATCHER: 'enforce' }, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout, '');
+});
