@@ -233,6 +233,28 @@ function sniffLoopInsert(source) {
     '详见 /arch-check 批量数据同步专项。误报则忽略。';
 }
 
+// ---------- 外部调用追踪嗅探：调用外部服务日志缺响应 ID ----------
+// 检测到 HTTP 客户端调用/大模型 SDK 调用 + 日志调用，但文件内未见任何外部响应 ID
+// 相关关键词 → NOTE 级提醒（单文件判断不了是否真的没记，宁可漏报不误伤）。
+// 豁免：test/测试文件、mock 文件；ui 层（前端调用通常不打服务端日志）。
+const EXT_CALL_RE = /\b(?:fetch\s*\(|axios\s*[.(]|httpClient\s*[.(]|requests\s*\.\s*(?:get|post|put|patch|delete)|http\.\s*(?:post|get|put|patch|delete)\s*\(|RestTemplate|gRPC|openai\s*\.|anthropic\s*\.|completions\s*\.\s*create\s*\(|messages\s*\.\s*create\s*\(|chat\s*\.\s*create\s*\()/i;
+const EXT_RESP_ID_RE = /response_?id|completion_?id|transaction_?id|external_?(?:id|request_?id)|resp(?:onse)?\.(?:data\.)?id\b|result\.id\b|\.headers?\[?\s*['"]x-request-id|x-trace-id/i;
+
+function sniffExternalCallTrace(source, layer) {
+  // ui 层豁免（前端组件不在此检查范围）
+  if (layer === 'ui') return null;
+  // 需要同时有外部调用 + 日志调用才触发（无日志 → 日志串联专项会管）
+  if (!EXT_CALL_RE.test(source)) return null;
+  if (!LOG_CALL_RE.test(source)) return null;
+  // 文件内出现了外部响应 ID 相关关键词 → 认为已处理，静默
+  if (EXT_RESP_ID_RE.test(source)) return null;
+  return '外部调用追踪提醒: 检测到外部服务调用（HTTP/SDK）与日志调用，但文件内未见' +
+    '外部服务响应 ID（response_id/completion_id/transaction_id 等）—— ' +
+    '调用外部服务后的日志应记录对方返回的唯一 ID，用于跨系统排查循迹' +
+    '（只有本地 request_id 不够，故障时需要拿对方的 id 去对方系统查）。' +
+    '详见 /arch-check 外部调用追踪专项。';
+}
+
 // ---------- 主流程 ----------
 if (config.watcher === 'off') process.exit(0);
 
@@ -256,6 +278,7 @@ readHookInput((event) => {
       sniffLogTrace(source, layer),                // 日志串联提醒（永不 enforce）
       sql.note,                                    // 裸 SQL 提醒（永不 enforce）
       timeoutSniff.note,                           // 超时阈值硬编码提醒（永不 enforce）
+      sniffExternalCallTrace(source, layer),       // 外部调用追踪提醒（永不 enforce）
     ].filter(Boolean);
 
     const hardHits = [archHit && archHit.msg, sql.hard, loopInsert, timeoutSniff.hard].filter(Boolean);

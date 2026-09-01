@@ -48,6 +48,11 @@ license: MIT
   导入导出等），必须同时设置**总超时（absolute timeout）**和**进度保活超时
   （progress timeout）**，并在超时判断时区分"整体卡死"与"仍在推进"。
   详见"任务超时设计专项"。
+- **外部服务调用日志追踪**：调用外部服务（大模型 API、其他业务 API、第三方
+  服务）时，相关日志**必须记录外部服务返回的 id 字段**（`response_id` /
+  `request_id` / `trace_id` / `completion_id` / `transaction_id` 等），
+  用于跨系统排查循迹。只打本地 request_id 不够——故障时需要拿着对方的 id
+  去对方系统查。详见"外部调用追踪专项"。
 - **跟随现状**：新代码与既有分层命名/目录结构冲突时，优先质疑新代码。
 
 ## 第 1 步：圈定变更范围
@@ -87,6 +92,10 @@ git diff [--staged] -- <file>   # 逐文件细看（只看新增/修改的 impor
    数据同步/导入/导出、定时任务——且代码中有超时判断、deadline 逻辑、
    任务状态流转（`running/timeout/failed`）、`last_heartbeat`/`progress_at`/
    `updated_at` 类进度时间戳字段——时，转"任务超时设计专项"逐条检查。
+10. **外部调用追踪触发**：变更涉及调用外部服务——HTTP 客户端（fetch/axios/
+   requests/httpClient/RestTemplate/gRPC）、大模型 API（OpenAI/Claude/
+   Gemini/通义千问/文心一言等）、第三方 SaaS API——且代码中有对应的日志
+   调用时，转"外部调用追踪专项"逐条检查。
 
 ### 状态同步专项：长耗时任务的竞态与中间态
 
@@ -399,6 +408,88 @@ token/密码/密钥时记一条 NOTE（超出架构范围但值得提）。
            pass  # 总超时已到但仍有进展 → 继续等待
 ```
 
+### 外部调用追踪专项：外部服务返回 ID 必须入日志
+
+**核心要求：调用外部服务（大模型、第三方 API、其他业务系统）时，日志必须记录
+外部服务返回的 id 字段**——`response_id` / `request_id` / `trace_id` /
+`completion_id` / `transaction_id` / `order_id` 等（以对方接口文档为准）。
+
+**为什么**：故障排查时只有本地 `request_id` 不够——需要拿着对方系统的 id 去
+对方的日志/控制台里定位问题。没有这个 id，排查就断在了系统边界上，
+双方对不上口径，排查效率骤降（尤其是大模型等按次计费的服务，
+计费争议也需要 id 溯源）。
+
+**适用信号**：`fetch`/`axios`/`requests`/`httpClient`/`RestTemplate`/`http.post`/
+`http.get`/`gRPC` 客户端调用；`openai.chat.completions.create`/
+`anthropic.messages.create` 等模型 SDK 调用；任何跨系统的出站请求。
+
+**触发专项时，对每处外部调用逐问检查：**
+
+**问 1：调用后有没有把响应 ID 记入日志？**
+- 外部服务通常在响应 header（`X-Request-Id`、`X-Trace-Id`）或响应体
+  （`id`、`request_id`、`completion.id`、`transaction_id`）中返回唯一 ID。
+- **WARN**：调用外部服务后打了日志，但日志里没有对方返回的 id。
+- **BLOCKER**：调用大模型等核心外部服务（影响业务结果的），日志中
+  完全没有响应 ID 且也没有本地 request_id 关联——排查和计费都断链。
+- 正确做法：调用完成后，日志至少包含：`{localRequestId, externalResponseId,
+  status, latency}`；异常时也记录（对方可能在错误响应里仍返回 id）。
+
+**问 2：响应 ID 与本地 request_id 是否关联？**
+- 只记录对方 id 不够，必须同时带上本地的 `request_id`——这样两个系统
+  的日志才能通过 request_id 和 external_id 双向查找。
+- 如果项目已有日志上下文注入（见"日志串联专项"），`request_id` 会自动携带；
+  只需确保 external_id 也进入同一条日志。
+
+**问 3：异常路径也记录了吗？**
+- 调用超时/网络错误/4xx/5xx 时，仍应尝试记录对方返回的 id
+  （很多 API 在 4xx/5xx 响应里也带 `request_id`）。
+- 至少记录：`{localRequestId, externalUrl/service, errorType, responseBody摘要}`。
+- 完全无响应（超时/连接失败）时记录：`{localRequestId, externalUrl, errorType}`。
+
+**问 4：大模型调用是否记录了模型名和 token 用量？**
+- 调用大模型 API 时，日志除了响应 ID 外，建议同时记录：
+  `model`（实际使用的模型名）、`usage`（prompt_tokens / completion_tokens）。
+- 这不是架构强制项，但对成本追踪和排查非常有用 = **NOTE**。
+
+**示例对照**（检查时的具象参照）：
+
+```
+✗ 反例：调用大模型但日志不带响应 ID
+   const result = await openai.chat.completions.create({ model, messages });
+   logger.info('LLM call done', { inputLen: messages.length });
+   //                               ↑ 对方的 completion id 呢？
+
+✗ 反例：调用业务 API 只记状态码
+   const resp = await axios.post('https://payment.internal/charge', body);
+   logger.info('payment charged', { status: resp.status });
+   //                               ↑ 对方返回的 transaction_id 呢？
+
+✓ 正例：记录外部服务响应 ID + 关联本地 request_id
+   const result = await openai.chat.completions.create({ model, messages });
+   logger.info('LLM call done', {
+     completionId: result.id,               // 对方的唯一 ID
+     model: result.model,                   // 实际模型
+     usage: result.usage,                   // token 用量
+     latencyMs: Date.now() - start,
+   });
+   // request_id 由日志上下文自动注入，无需手工传
+
+✓ 正例（异常路径）：
+   try {
+     const resp = await axios.post(paymentUrl, body);
+     logger.info('payment ok', {
+       transactionId: resp.data.transaction_id,
+       status: resp.status,
+     });
+   } catch (err) {
+     logger.error('payment failed', {
+       externalRequestId: err.response?.data?.request_id,  // 对方的错误 ID
+       status: err.response?.status,
+       errorMsg: err.message,
+     });
+   }
+```
+
 ## 第 3 步：输出报告
 
 格式（每条违规一行，按严重度分组）：
@@ -414,13 +505,16 @@ token/密码/密钥时记一条 NOTE（超出架构范围但值得提）。
   无保护的共享消费（既无认领也无幂等）、请求路径日志无 request_id、
   无 WHERE 的 UPDATE/DELETE、循环逐条写入数据库（已知为批量同步场景）、
   **长耗时任务只有一个超时维度（缺总超时或缺进度保活超时）**、
-  **超时判断逻辑用单条件（没有保活判断）或存在时钟不一致**——不合就不能合入。
+  **超时判断逻辑用单条件（没有保活判断）或存在时钟不一致**、
+  **调用核心外部服务（大模型等）日志中无响应 ID 且无本地 request_id 关联**——
+  不合就不能合入。
 - **WARN**：跨模块直达内部、过度抽象、现状不一致、暴露中间态但下游暂未消费、
   事务外发布完成事件、request_id 靠层层手工传参、涉用户日志缺 user_id、
   多租户日志缺 tenant_id、异步边界日志上下文丢失、简单操作绕过 ORM、
   原生 SQL 使用 SELECT *、批量写入未控制 batch size 或未按批提交事务、
   **超时阈值硬编码在代码里（应改为可配置）**、
-  **进度刷新只更新时间戳而不更新进度计数（无法区分卡死与推进）**——
+  **进度刷新只更新时间戳而不更新进度计数（无法区分卡死与推进）**、
+  **调用外部服务后日志缺对方返回的响应 ID（影响跨系统排查）**——
   建议改，可带 `arch-debt:` 标记合入。
 - **NOTE**：值得记录但不要求本次处理（如轮询消费建议确认认领/幂等、
   日志中出现敏感凭证、集中合理使用原生复杂 SQL、ORM 大表全字段拉取）。

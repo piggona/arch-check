@@ -108,6 +108,27 @@
 - **时钟统一**：所有时间字段和比较统一使用 UTC；worker 与 scheduler 依赖同一时钟源。
 - **配置来源**：超时阈值从环境变量/配置中心读取，不硬编码。
 
+## 外部服务调用追踪
+
+<!-- 按项目实际的外部服务清单修改；arch-check 的"外部调用追踪专项"按本节执行 -->
+
+- **响应 ID 必须入日志**：调用外部服务（大模型 API、业务 API、第三方服务）后，
+  日志必须记录对方返回的唯一 ID（响应 header `X-Request-Id`/`X-Trace-Id`，
+  或响应体 `id`/`request_id`/`completion_id`/`transaction_id`）。
+- **与本地 request_id 关联**：同一条日志里同时携带本地 `request_id` 和外部
+  `external_id`，实现双向溯源。如果已有日志上下文注入，`request_id` 自动携带。
+- **异常路径也记录**：4xx/5xx/超时时仍尝试记录对方返回的 id 和 error 摘要。
+- **大模型调用额外记录**：`model`（实际使用的模型名）、`usage`（token 用量），
+  便于成本追踪。
+- **外部服务清单**（维护点——按项目实际填写）：
+
+| 服务 | 典型调用方式 | 响应 ID 字段 |
+|---|---|---|
+| OpenAI / Azure OpenAI | `openai.chat.completions.create()` | `response.id` |
+| Claude (Anthropic) | `anthropic.messages.create()` | `response.id` |
+| 支付网关 | `POST /charge` | `response.data.transaction_id` |
+| 内部用户服务 | `GET /users/:id` | `response.headers['x-request-id']` |
+
 ## 架构债约定
 
 - 有意保留的架构妥协在代码处标记：`// arch-debt: <上限/风险>, <升级触发条件>, <关联>`
@@ -126,3 +147,5 @@
 "批量数据同步专项"部分。
 涉及长耗时任务、job/worker、超时逻辑、进度刷新的改动：完成后重点看 /arch-check
 报告中的"任务超时设计专项"部分。
+涉及外部服务调用（HTTP 客户端、大模型 SDK、第三方 API）的改动：完成后重点看
+/arch-check 报告中的"外部调用追踪专项"部分。

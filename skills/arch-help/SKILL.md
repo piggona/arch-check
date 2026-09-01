@@ -31,7 +31,10 @@ description: >
    不超过 SQL 传输限制；
    长耗时任务超时设计——必须同时设置总超时（absolute_timeout）和进度保活超时
    （progress_timeout），超时判断为双条件 AND（总超时到期 AND 保活窗口无进度），
-   进度刷新同时更新时间戳+进度计数，阈值从配置读，时间比较统一 UTC
+   进度刷新同时更新时间戳+进度计数，阈值从配置读，时间比较统一 UTC；
+   外部调用日志追踪——调用外部服务（大模型/业务 API/第三方服务）后日志必须记录
+   对方返回的唯一 ID（response_id/completion_id/transaction_id），并与本地
+   request_id 关联，异常路径也要记，大模型调用额外记 model 和 token usage
 
 ## arch-debt 标记语法
 
@@ -49,7 +52,8 @@ description: >
   提醒补 request_id/user_id/tenant_id、原生 SQL 简单操作与 SELECT *——
   提醒走 ORM 并显式列出字段、循环内逐条 INSERT/create——
   提醒改为批量写入并控制 batch size、超时逻辑缺保活判断或阈值硬编码——
-  提醒补双窗口超时设计）。
+  提醒补双窗口超时设计、外部服务调用日志缺响应 ID——
+  提醒记录对方返回的唯一 ID 用于跨系统排查）。
   提醒强度由 `ARCH_CHECK_WATCHER` 控制：`hint`（默认，仅提示）/
   `enforce`（输出阻断提醒，代理会自我修正）/ `off`
 

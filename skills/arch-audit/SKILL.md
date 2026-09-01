@@ -72,6 +72,13 @@ infra/          12      DB/HTTP 适配
    超时判断是否为双条件 AND（总超时到 AND 保活窗口内无进度）；进度刷新是否同时
    更新时间戳和进度计数；超时阈值是否从配置读取；时间比较是否统一 UTC 时钟。
    详细判定标准见 arch-check 技能的"任务超时设计专项"。
+10. **外部调用追踪**：搜索全库出站 HTTP 调用（fetch/axios/requests/httpClient/
+   RestTemplate/gRPC）和大模型 SDK 调用（openai/anthropic 等），抽样调用点
+   （每类 ≤10 处，说明抽样率），检查调用完成后的日志是否记录了外部服务返回的
+   唯一 ID（response_id/completion_id/transaction_id 等）；响应 ID 是否与
+   本地 request_id 关联（双向可查）；异常路径（4xx/5xx/超时）是否也尝试
+   记录对方返回的 ID；大模型调用是否额外记录 model 和 token usage。
+   详细判定标准见 arch-check 技能的"外部调用追踪专项"。
 
 ## 第 3 步：输出报告
 

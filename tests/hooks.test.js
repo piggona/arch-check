@@ -355,3 +355,64 @@ test('watcher(enforce): 双窗口超时不误 block', () => {
   assert.equal(r.status, 0, r.stderr);
   assert.equal(r.stdout, '');
 });
+
+// ---------- 外部调用追踪嗅探（外部服务响应 ID） ----------
+
+test('watcher: 调用外部服务 + 日志但无响应 ID → 输出外部调用追踪提醒', () => {
+  const f = writeFixture('src/services/llm-client.ts',
+    "const result = await openai.chat.completions.create({ model, messages });\n" +
+    "logger.info('LLM call done', { inputLen: messages.length });\n");
+  const r = run('arch-watcher.js', {}, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.match(out.hookSpecificOutput.additionalContext, /外部调用追踪提醒/);
+});
+
+test('watcher: 调用外部服务 + 日志带 result.id → 静默', () => {
+  const f = writeFixture('src/services/llm-client2.ts',
+    "const result = await openai.chat.completions.create({ model, messages });\n" +
+    "logger.info('LLM call done', { completionId: result.id, model: result.model, requestId });\n");
+  const r = run('arch-watcher.js', {}, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout, '');
+});
+
+test('watcher: axios 调用 + 日志带 response_id → 静默', () => {
+  const f = writeFixture('src/services/payment.ts',
+    "const resp = await axios.post('https://pay.example/charge', body);\n" +
+    "logger.info('payment ok', { transactionId: resp.data.transaction_id, status: resp.status, requestId });\n");
+  const r = run('arch-watcher.js', {}, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout, '');
+});
+
+test('watcher: 外部调用无日志 → 静默（日志串联专项管）', () => {
+  const f = writeFixture('src/services/quick-fetch.ts',
+    "const resp = await fetch('https://api.example.com/data');\n" +
+    "return resp.json();\n");
+  const r = run('arch-watcher.js', {}, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  // 无日志调用 → 外部调用追踪不触发（可能由日志串联专项提醒缺日志）
+  assert.equal(r.stdout, '');
+});
+
+test('watcher: ui 层的外部调用 → 静默（ui 层豁免）', () => {
+  const f = writeFixture('src/ui/api-client.ts',
+    "const resp = await fetch('/api/orders');\n" +
+    "console.log('fetched', resp.status);\n");
+  const r = run('arch-watcher.js', {}, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout, '');
+});
+
+test('watcher(enforce): 外部调用追踪提醒不升级为 block（NOTE 级）', () => {
+  const f = writeFixture('src/services/ext-svc.ts',
+    "const ctx = { requestId: req.id };\n" +
+    "const resp = await axios.post(url, body);\n" +
+    "logger.info('call done', { status: resp.status, requestId: ctx.requestId });\n");
+  const r = run('arch-watcher.js', { ARCH_CHECK_WATCHER: 'enforce' }, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.equal(out.decision, undefined, '外部调用追踪提醒不应产生 decision:block');
+  assert.match(out.hookSpecificOutput.additionalContext, /外部调用追踪提醒/);
+});
