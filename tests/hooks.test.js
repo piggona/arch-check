@@ -416,3 +416,89 @@ test('watcher(enforce): 外部调用追踪提醒不升级为 block（NOTE 级）
   assert.equal(out.decision, undefined, '外部调用追踪提醒不应产生 decision:block');
   assert.match(out.hookSpecificOutput.additionalContext, /外部调用追踪提醒/);
 });
+
+// ---------- 高频写入表嗅探（异步缓冲与分表） ----------
+
+test('watcher: service 层主流程同步写入 record 表 → 输出高频写入提醒', () => {
+  const f = writeFixture('src/services/task-runner.ts',
+    "async function runTask(task) {\n" +
+    "  const result = await execute(task);\n" +
+    "  await db.execute('INSERT INTO task_records (task_id, result) VALUES (?, ?)', [task.id, result]);\n" +
+    "  return result;\n" +
+    "}\n");
+  const r = run('arch-watcher.js', {}, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.match(out.hookSpecificOutput.additionalContext, /高频写入表提醒/);
+});
+
+test('watcher: service 层 ORM 同步写入 audit_log → 输出高频写入提醒', () => {
+  const f = writeFixture('src/services/auditor.ts',
+    "async function logAction(userId, action) {\n" +
+    "  await AuditLog.create({ userId, action, createdAt: new Date() });\n" +
+    "}\n");
+  const r = run('arch-watcher.js', {}, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.match(out.hookSpecificOutput.additionalContext, /高频写入表提醒/);
+});
+
+test('watcher: 使用 buffer/queue 解耦 → 静默（已异步化）', () => {
+  const f = writeFixture('src/services/task-runner2.ts',
+    "function runTask(task) {\n" +
+    "  const result = execute(task);\n" +
+    "  recordBuffer.push({ taskId: task.id, result });\n" +
+    "  return result;\n" +
+    "}\n");
+  const r = run('arch-watcher.js', {}, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout, '');
+});
+
+test('watcher: 使用 MQ publish 记录 → 静默（消息队列解耦）', () => {
+  const f = writeFixture('src/services/event-logger.ts',
+    "async function logEvent(event) {\n" +
+    "  await queue.publish('operation_logs', { ...event, timestamp: Date.now() });\n" +
+    "}\n");
+  const r = run('arch-watcher.js', {}, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout, '');
+});
+
+test('watcher: infra 层写入 record 表 → 不输出高频写入提醒（infra 层豁免）', () => {
+  const f = writeFixture('src/infra/record-repo.ts',
+    "export async function saveRecord(record) {\n" +
+    "  await db.execute('INSERT INTO task_records (task_id, result) VALUES (?, ?)', [record.taskId, record.result]);\n" +
+    "}\n");
+  const r = run('arch-watcher.js', {}, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  // infra 层可能触发裸 SQL 提醒，但不应触发高频写入提醒
+  if (r.stdout) {
+    assert.doesNotMatch(r.stdout, /高频写入表提醒/);
+  }
+});
+
+test('watcher: service 层写入普通业务表（非记录类） → 不输出高频写入提醒', () => {
+  const f = writeFixture('src/services/order-svc.ts',
+    "async function placeOrder(data) {\n" +
+    "  await db.execute('INSERT INTO orders (user_id, amount) VALUES (?, ?)', [data.userId, data.amount]);\n" +
+    "}\n");
+  const r = run('arch-watcher.js', {}, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  // service 层裸 SQL 可能触发日志串联提醒和裸 SQL 提醒，但不应触发高频写入提醒
+  if (r.stdout) {
+    assert.doesNotMatch(r.stdout, /高频写入表提醒/);
+  }
+});
+
+test('watcher(enforce): 高频写入提醒不升级为 block（NOTE 级）', () => {
+  const f = writeFixture('src/services/tracker.ts',
+    "async function track(action) {\n" +
+    "  await db.insert({ table: 'action_logs', data: { action, ts: Date.now() } });\n" +
+    "}\n");
+  const r = run('arch-watcher.js', { ARCH_CHECK_WATCHER: 'enforce' }, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.equal(out.decision, undefined, '高频写入提醒不应产生 decision:block');
+  assert.match(out.hookSpecificOutput.additionalContext, /高频写入表提醒/);
+});

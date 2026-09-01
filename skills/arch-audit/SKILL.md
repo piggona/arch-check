@@ -79,6 +79,13 @@ infra/          12      DB/HTTP 适配
    本地 request_id 关联（双向可查）；异常路径（4xx/5xx/超时）是否也尝试
    记录对方返回的 ID；大模型调用是否额外记录 model 和 token usage。
    详细判定标准见 arch-check 技能的"外部调用追踪专项"。
+11. **高频写入表**：搜索全库记录/日志类数据表（task_records/operation_logs/
+   audit_logs/action_logs/behavior/analytics/metrics 等命名的表或模型），
+   检查写入路径是否在请求主流程中同步执行（await INSERT/create = 阻塞主流程）；
+   是否采用了异步缓冲策略（buffer flush/消息队列/后台线程）；此类表是否有
+   分表/分区定义（按时间 PARTITION BY RANGE 或按字段 hash）；buffer 机制
+   是否有 shutdown drain 和 flush 失败重试；记录表是否与主业务共享连接池。
+   详细判定标准见 arch-check 技能的"高频写入表专项"。
 
 ## 第 3 步：输出报告
 

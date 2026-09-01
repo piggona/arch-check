@@ -255,6 +255,36 @@ function sniffExternalCallTrace(source, layer) {
     '详见 /arch-check 外部调用追踪专项。';
 }
 
+// ---------- 高频写入表嗅探：主流程同步写入记录表 ----------
+// 检测思路：文件同时出现"记录/日志/流水类表名关键词"和"同步写入"（非异步/buffer），
+// 且位于 service 层（主流程代码）→ NOTE 级提醒。
+// 因为单文件无法确定业务是否高频、表是否该分表，只做温和提醒，永不 enforce。
+// 豁免：出现了 buffer/queue/async 解耦关键词 → 认为已做异步化处理。
+// 匹配记录/日志类表名——仅在以下场景触发：
+// 蛇形命名（task_records、audit_logs）：用复合词匹配，避免单独 "log" 误伤 console.log
+// 驼峰命名（AuditLog、TaskRecord）：要求大写开头的组合词
+const RECORD_TABLE_SNAKE_RE = /\b(?:task_records?|audit_?logs?|action_logs?|operation_logs?|event_logs?|behavior_?logs?|call_logs?|api_logs?|trace_logs?|access_logs?|change_logs?|history_logs?)\b/i;
+const RECORD_TABLE_CAMEL_RE = /(?:Record|Log|Audit|Trail|History|Metric)(?:s?\b|[A-Z])/;
+const SYNC_WRITE_RE = /(?:await\s+)?(?:db\.\s*(?:execute|query|insert)\b|\.create\s*\(\s*\{|\.save\s*\(|\.insert\s*\(|INSERT\s+INTO\b)/i;
+const ASYNC_BUFFER_RE = /\b(?:buffer|flush|enqueue|publish|emit|push\s*\(|addToQueue|sendMessage|produce|MQ|kafka|rabbitMQ|redis\s*\.\s*(?:lpush|rpush|xadd)|channel\.\s*(?:send|publish)|queue\.\s*(?:add|push|publish|send))\b/i;
+const PARTITION_RE = /\b(?:partition|partitioned|sharding|shard|分表|分区)\b/i;
+
+function sniffHighFreqWrite(source, layer) {
+  // 只针对 service 层（主流程代码）；infra 层可能是 DAO 本身不误伤
+  if (layer !== 'service') return null;
+  // 需要同时出现记录表关键词 + 同步写入
+  if (!RECORD_TABLE_SNAKE_RE.test(source) && !RECORD_TABLE_CAMEL_RE.test(source)) return null;
+  if (!SYNC_WRITE_RE.test(source)) return null;
+  // 已有异步/buffer 解耦 → 静默
+  if (ASYNC_BUFFER_RE.test(source)) return null;
+  return '高频写入表提醒: 检测到在主流程中同步写入记录/日志类数据表 — ' +
+    '高并发场景下，此类高频写入不应阻塞主流程（每次请求一个 INSERT = ' +
+    '写入延迟直接加到响应时间上，数据库压力倍增）。' +
+    '应改为 buffer flush（内存攒批+定时刷盘）或异步队列解耦。' +
+    '同时注意此类大数据量表需按时间/字段分表存储，避免单表膨胀。' +
+    '详见 /arch-check 高频写入表专项。';
+}
+
 // ---------- 主流程 ----------
 if (config.watcher === 'off') process.exit(0);
 
@@ -279,6 +309,7 @@ readHookInput((event) => {
       sql.note,                                    // 裸 SQL 提醒（永不 enforce）
       timeoutSniff.note,                           // 超时阈值硬编码提醒（永不 enforce）
       sniffExternalCallTrace(source, layer),       // 外部调用追踪提醒（永不 enforce）
+      sniffHighFreqWrite(source, layer),           // 高频写入表提醒（永不 enforce）
     ].filter(Boolean);
 
     const hardHits = [archHit && archHit.msg, sql.hard, loopInsert, timeoutSniff.hard].filter(Boolean);

@@ -53,6 +53,11 @@ license: MIT
   `request_id` / `trace_id` / `completion_id` / `transaction_id` 等），
   用于跨系统排查循迹。只打本地 request_id 不够——故障时需要拿着对方的 id
   去对方系统查。详见"外部调用追踪专项"。
+- **高频写入表：异步缓冲与分表**：高并发场景的高频记录表（任务执行日志、
+  行为埋点、操作流水等），写入操作**不能阻塞主流程**——必须通过异步队列、
+  内存 buffer flush、旁路写入等方式解耦；同时此类大数据量表**必须按时间或
+  其他字段特征分表（分区）存储**，避免单表体积膨胀导致查询劣化和维护困难。
+  详见"高频写入表专项"。
 - **跟随现状**：新代码与既有分层命名/目录结构冲突时，优先质疑新代码。
 
 ## 第 1 步：圈定变更范围
@@ -96,6 +101,9 @@ git diff [--staged] -- <file>   # 逐文件细看（只看新增/修改的 impor
    requests/httpClient/RestTemplate/gRPC）、大模型 API（OpenAI/Claude/
    Gemini/通义千问/文心一言等）、第三方 SaaS API——且代码中有对应的日志
    调用时，转"外部调用追踪专项"逐条检查。
+11. **高频写入表触发**：变更涉及高频写入场景——任务执行记录/行为日志/
+   操作流水/埋点数据/审计日志——的数据库写入逻辑，或者在请求处理主流程中
+   同步写入此类记录表时，转"高频写入表专项"逐条检查。
 
 ### 状态同步专项：长耗时任务的竞态与中间态
 
@@ -490,6 +498,150 @@ token/密码/密钥时记一条 NOTE（超出架构范围但值得提）。
    }
 ```
 
+### 高频写入表专项：异步缓冲与分表存储
+
+**核心要求：高并发业务的高频记录表（每次请求/任务都写一条记录的表），
+写入不能阻塞主流程，必须通过异步缓冲方式批量落库；同时此类表因数据量大，
+必须按时间或其他字段特征分表（分区）存储。**
+
+**适用信号**：任务执行记录表、行为日志/埋点表、操作流水表、审计日志表、
+API 调用记录表——任何"每次业务动作都写一条"且数据量随时间线性增长的表。
+
+**为什么写入要异步**：高并发场景下，主流程中同步写入这类记录表（每次请求
+一个 INSERT），会导致：
+- **主流程延迟增加**：数据库写入延迟直接加到响应时间上（p99 尤其明显）；
+- **数据库压力倍增**：QPS 等于业务 QPS，连接池/磁盘 IO 成为瓶颈；
+- **级联故障**：记录表写入慢/连接池满 → 主流程超时/失败（记录不应拖垮业务）。
+
+**为什么要分表**：此类表数据量随时间线性膨胀，不分表会导致：
+- **查询劣化**：全表扫描越来越慢，索引树深度增加，even 索引查询也退化；
+- **DDL 锁表风险**：ALTER TABLE 在大表上锁定时间长，加字段/索引变成运维事故；
+- **备份/迁移困难**：单表几十 GB 的 dump/restore 耗时不可控。
+
+**触发专项时，对高频写入逻辑逐问检查：**
+
+**问 1：写入是否脱离了主流程？**
+- 反模式（**WARN**）：在请求处理函数/任务执行主路径中**同步**写入记录表——
+  `await db.insert(record)` 或 ORM `.create()` 直接 await 在主流程里。
+  主流程必须等写入完成才能继续，写入延迟直接叠加到业务响应时间。
+- 正确做法（任选其一）：
+  a) **内存 buffer + 定时/定量 flush**：写入先攒到内存缓冲区，达到阈值
+     （条数或时间间隔）后批量 INSERT——主流程只做 `buffer.push(record)`，
+     开销约等于零。需注意 flush 失败的重试和进程退出前的 drain。
+  b) **异步队列/消息**：主流程发消息到队列（Kafka/RabbitMQ/Redis Stream），
+     消费者异步批量写入数据库——完全解耦，主流程无数据库操作。
+  c) **后台线程/协程池**：主流程把写入任务丢到后台——注意背压控制和
+     资源回收。
+- 如果业务确实要求**写入后立即可查**（如审计合规要求实时可查），
+  则同步写入可接受，但仍应走连接池隔离（记录表用独立连接池/数据源，
+  不与主业务共享），并标注 `arch-debt:` 说明理由。
+- **BLOCKER**：高频记录表写入和主业务逻辑在同一个事务里——记录写入失败
+  导致业务事务回滚。记录与业务数据应该**事务隔离**。
+
+**问 2：是否有分表/分区策略？**
+- 反模式（**WARN**）：高频写入表使用单张表，无分表/分区定义，
+  数据量随时间增长无上限——迟早变成运维噩梦。
+- 正确做法：
+  a) **按时间分表/分区**：按天/周/月分表（`records_202609`）或使用数据库
+     原生分区（PostgreSQL PARTITION BY RANGE、MySQL PARTITION BY RANGE）。
+  b) **按业务字段分表**：按 `tenant_id`/`project_id` 等字段 hash 或 range
+     分表——适用于多租户且各租户数据量差异大的场景。
+  c) **归档策略**：冷数据定期归档到低成本存储（S3/OSS/冷库），
+     热表只保留近 N 天数据。
+- 分表方案必须在 migration 或建表脚本中体现，不能"计划以后再做"。
+- 查询侧必须带分区键（时间/租户），否则跨分区扫描反而更慢。
+
+**问 3：缓冲机制的容错处理了吗？**
+- buffer flush 失败时必须有重试策略（指数退避 + 最大重试次数）。
+- 进程意外退出前的 buffer 内容不能丢——注册 shutdown hook 做最终 drain，
+  或使用持久化队列（WAL/消息队列）而非纯内存 buffer。
+- 消息队列方式：消费者挂掉时消息不丢（at-least-once），
+  重复消费有幂等保护（record 唯一键去重）。
+- WARN：纯内存 buffer 且无 shutdown drain——进程崩溃丢数据。
+
+**问 4：连接池/数据源是否隔离？**
+- 高频记录表的写入（无论同步还是异步 flush）应使用**独立连接池/数据源**，
+  不与主业务共享——避免记录表写入高峰占满连接导致主业务不可用。
+- NOTE 级提醒：如果项目当前只有一个数据源，建议后续拆分。
+
+**示例对照**（检查时的具象参照）：
+
+```
+✗ 反例 1：主流程同步写入记录表（每次请求一个 INSERT）
+   async function handleTask(task) {
+     const result = await executeTask(task);
+     // 同步写入 — 写入延迟直接加到任务耗时上，且写入失败可能影响主流程
+     await db.execute("INSERT INTO task_records (task_id, result, created_at) VALUES (?, ?, NOW())",
+                      [task.id, result, ]);
+     return result;
+   }
+
+✗ 反例 2：记录写入与业务在同一事务（记录失败 = 业务回滚）
+   async function placeOrder(order) {
+     await db.transaction(async (tx) => {
+       await tx.insert('orders', order);
+       await tx.insert('operation_logs', { action: 'order_placed', ... });  // 同事务！
+     });
+   }
+
+✗ 反例 3：高频表无分表（单表几千万行 + 还在 INSERT）
+   CREATE TABLE task_records (
+     id BIGINT AUTO_INCREMENT PRIMARY KEY,
+     task_id BIGINT, result TEXT, created_at DATETIME,
+     INDEX idx_task_id (task_id)
+   );  -- 无分区、无归档、数据量无上限
+
+✓ 正例：内存 buffer + 定时 flush + 按月分表
+   // 主流程：只往 buffer 推，开销约等于零
+   function handleTask(task) {
+     const result = executeTask(task);
+     recordBuffer.push({ taskId: task.id, result, createdAt: new Date() });
+     return result;  // 不等写入
+   }
+
+   // 后台 flush（每 5 秒或攒满 500 条）
+   setInterval(async () => {
+     const batch = recordBuffer.drain(500);
+     if (batch.length === 0) return;
+     const table = `task_records_${formatMonth(new Date())}`;  // 按月分表
+     await recordDb.bulkInsert(table, batch);                  // 独立连接池
+   }, 5000);
+
+   // shutdown hook 保证进程退出前不丢数据
+   process.on('SIGTERM', async () => {
+     await recordBuffer.flushAll();
+     process.exit(0);
+   });
+
+✓ 正例（消息队列方式）：
+   // 主流程：发消息，不碰数据库
+   async function handleTask(task) {
+     const result = await executeTask(task);
+     await mq.publish('task_records', { taskId: task.id, result });
+     return result;
+   }
+
+   // 消费者：批量消费 + 写入分区表
+   consumer.on('batch', async (messages) => {
+     const records = messages.map(m => m.value);
+     const table = `task_records_${formatMonth(new Date())}`;
+     await db.bulkInsert(table, records);
+     await consumer.commitOffset();
+   });
+
+✓ 正例（数据库分区）：
+   CREATE TABLE task_records (
+     id BIGINT AUTO_INCREMENT,
+     task_id BIGINT, result TEXT, created_at DATETIME,
+     PRIMARY KEY (id, created_at),
+     INDEX idx_task_id (task_id, created_at)
+   ) PARTITION BY RANGE (TO_DAYS(created_at)) (
+     PARTITION p202609 VALUES LESS THAN (TO_DAYS('2026-10-01')),
+     PARTITION p202610 VALUES LESS THAN (TO_DAYS('2026-11-01')),
+     PARTITION p_future VALUES LESS THAN MAXVALUE
+   );
+```
+
 ## 第 3 步：输出报告
 
 格式（每条违规一行，按严重度分组）：
@@ -506,7 +658,8 @@ token/密码/密钥时记一条 NOTE（超出架构范围但值得提）。
   无 WHERE 的 UPDATE/DELETE、循环逐条写入数据库（已知为批量同步场景）、
   **长耗时任务只有一个超时维度（缺总超时或缺进度保活超时）**、
   **超时判断逻辑用单条件（没有保活判断）或存在时钟不一致**、
-  **调用核心外部服务（大模型等）日志中无响应 ID 且无本地 request_id 关联**——
+  **调用核心外部服务（大模型等）日志中无响应 ID 且无本地 request_id 关联**、
+  **高频记录表写入与主业务在同一事务（记录失败导致业务回滚）**——
   不合就不能合入。
 - **WARN**：跨模块直达内部、过度抽象、现状不一致、暴露中间态但下游暂未消费、
   事务外发布完成事件、request_id 靠层层手工传参、涉用户日志缺 user_id、
@@ -514,7 +667,10 @@ token/密码/密钥时记一条 NOTE（超出架构范围但值得提）。
   原生 SQL 使用 SELECT *、批量写入未控制 batch size 或未按批提交事务、
   **超时阈值硬编码在代码里（应改为可配置）**、
   **进度刷新只更新时间戳而不更新进度计数（无法区分卡死与推进）**、
-  **调用外部服务后日志缺对方返回的响应 ID（影响跨系统排查）**——
+  **调用外部服务后日志缺对方返回的响应 ID（影响跨系统排查）**、
+  **高频写入表在主流程中同步 INSERT（应异步缓冲/队列解耦）**、
+  **高频写入表无分表/分区策略（数据量随时间无上限增长）**、
+  **纯内存 buffer 无 shutdown drain（进程崩溃丢数据）**——
   建议改，可带 `arch-debt:` 标记合入。
 - **NOTE**：值得记录但不要求本次处理（如轮询消费建议确认认领/幂等、
   日志中出现敏感凭证、集中合理使用原生复杂 SQL、ORM 大表全字段拉取）。

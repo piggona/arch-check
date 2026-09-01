@@ -1,6 +1,6 @@
 {
   "name": "arch-check",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "研发代码后的架构检查：变更级检查、全库审计、架构债台账，外加写后自动嗅探。",
   "author": {
     "name": "piggona",
