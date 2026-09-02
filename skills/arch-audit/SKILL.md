@@ -86,6 +86,12 @@ infra/          12      DB/HTTP 适配
    分表/分区定义（按时间 PARTITION BY RANGE 或按字段 hash）；buffer 机制
    是否有 shutdown drain 和 flush 失败重试；记录表是否与主业务共享连接池。
    详细判定标准见 arch-check 技能的"高频写入表专项"。
+12. **时间字段类型**：搜索全库 DDL（CREATE TABLE/ALTER TABLE）和 ORM 模型定义
+   （model field/migration），检查时间字段是否使用 `TIMESTAMP` 类型；
+   是否存在 `DATETIME` 或 `DATE` 类型的时间字段；如果有，标注受影响的表和字段。
+   原因：数据导入大数据平台（Hive 等）时，`TIMESTAMP` 可直接映射并参与时间运算，
+   `DATETIME`/`DATE` 只能映射为 `STRING` 无法做逻辑操作。
+   详细判定标准见 arch-check 技能的"时间字段类型专项"。
 
 ## 第 3 步：输出报告
 

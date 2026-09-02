@@ -285,6 +285,61 @@ function sniffHighFreqWrite(source, layer) {
     '详见 /arch-check 高频写入表专项。';
 }
 
+// ---------- 时间字段类型嗅探：DDL/ORM 中使用 DATETIME/DATE 而非 TIMESTAMP ----------
+// 检测思路：DDL（CREATE TABLE / ALTER TABLE）中出现 DATETIME 或 DATE 类型定义，
+// 或者 ORM 模型定义中出现 DateTime/DateField/DateTimeField 映射为非 TIMESTAMP。
+// 这是确定性文本违规（和 SELECT * 类似），enforce 档可 block。
+// 豁免：注释行、字符串字面量中的 DATETIME（如日志文本）、TIMESTAMP 类型本身、
+//        已有 arch-debt 标记的行。
+// 注意：DATE 单独出现在 SQL 中非常常见（如 DATE() 函数、CURRENT_DATE），
+//        只在明确的列定义上下文中才算违规——需要前面有列名或逗号+空白。
+const DDL_CONTEXT_RE = /\b(?:CREATE\s+TABLE|ALTER\s+TABLE)\b/i;
+// 列定义中的 DATETIME：列名后紧跟 DATETIME（不带 TIMESTAMP 前缀）
+const COL_DATETIME_RE = /\b(?:DATETIME)\b/i;
+// 列定义中的 DATE（独立类型，排除 TIMESTAMP / DATETIME / DATE() 函数 / UPDATE 语句中的赋值）
+// 策略：在 DDL 上下文中，单独的 DATE 类型——前面是列名或逗号，后面是空白/逗号/括号/NOT/NULL/DEFAULT
+const COL_DATE_RE = /\bDATE\b(?!\s*\(|\s*TIME)/i;
+// ORM 模型中的 DateTime/DateField 类型定义（非 TIMESTAMP 映射）
+const ORM_DATETIME_RE = /\b(?:DateTimeField|DateField|Column\s*\(\s*(?:DateTime|Date)\s*[,)]|type:\s*['"](?:datetime|date)['"]|@Temporal)/i;
+// TIMESTAMP 合法关键词——如果同行/同上下文有 TIMESTAMP，说明已正确使用
+const TIMESTAMP_RE = /\bTIMESTAMP\b/i;
+
+function sniffDatetimeType(source) {
+  // 需要有 DDL 上下文或 ORM 模型定义
+  const hasDDL = DDL_CONTEXT_RE.test(source);
+  const hasORM = ORM_DATETIME_RE.test(source);
+  if (!hasDDL && !hasORM) return null;
+
+  // DDL 中有 DATETIME 或独立 DATE
+  if (hasDDL) {
+    const hasDatetime = COL_DATETIME_RE.test(source);
+    const hasDate = COL_DATE_RE.test(source);
+    // 如果文件同时有 TIMESTAMP 说明可能是混用——仍然报 DATETIME/DATE 的问题
+    if (hasDatetime || hasDate) {
+      const types = [hasDatetime && 'DATETIME', hasDate && 'DATE'].filter(Boolean).join('/');
+      return '时间字段类型违规[使用 ' + types + '] — 数据表时间字段应使用 TIMESTAMP 类型，' +
+        '禁止 DATETIME/DATE。原因：数据导入大数据平台（Hive 等）时，TIMESTAMP 可直接映射并' +
+        '参与时间运算（比较/过滤/分区裁剪），而 DATETIME/DATE 只能映射为 STRING，' +
+        '无法直接做逻辑运算，每次使用需额外 CAST 且格式不一致时静默返回 NULL。' +
+        '详见 /arch-check 时间字段类型专项。超出 TIMESTAMP 范围的合理例外需标注 arch-debt。';
+    }
+  }
+
+  // ORM 模型定义中有 DateTime/DateField（非 TIMESTAMP 映射）
+  if (hasORM) {
+    // 如果文件内同时有 TIMESTAMP 关键词，可能已经显式指定了——但 ORM_DATETIME_RE
+    // 命中的是 Column(DateTime) 等，说明未用 TIMESTAMP，仍然报
+    return '时间字段类型违规[ORM 模型使用 DateTime/Date 映射] — ORM 模型的时间字段应确保' +
+      '映射到数据库时生成 TIMESTAMP 类型（而非 DATETIME/DATE）。' +
+      'SQLAlchemy 用 Column(TIMESTAMP)，TypeORM 用 { type: "timestamp" }，' +
+      'Django 需确认 migration 输出。' +
+      '原因：DATETIME/DATE 导入 Hive 后映射为 STRING，无法直接做时间运算。' +
+      '详见 /arch-check 时间字段类型专项。';
+  }
+
+  return null;
+}
+
 // ---------- 主流程 ----------
 if (config.watcher === 'off') process.exit(0);
 
@@ -303,6 +358,7 @@ readHookInput((event) => {
     const sql = sniffSqlUsage(source);             // SELECT * 违规（可 enforce）+ 裸 DML 提醒
     const loopInsert = sniffLoopInsert(source);    // 循环逐条写入（可 enforce）
     const timeoutSniff = sniffTimeoutDesign(source); // 单窗口超时（可 enforce）+ 阈值硬编码提醒
+    const datetimeHit = sniffDatetimeType(source); // DATETIME/DATE 类型（可 enforce）
     const notes = [
       sniffPollingConsumer(source),                // 状态同步提醒（永不 enforce）
       sniffLogTrace(source, layer),                // 日志串联提醒（永不 enforce）
@@ -312,7 +368,7 @@ readHookInput((event) => {
       sniffHighFreqWrite(source, layer),           // 高频写入表提醒（永不 enforce）
     ].filter(Boolean);
 
-    const hardHits = [archHit && archHit.msg, sql.hard, loopInsert, timeoutSniff.hard].filter(Boolean);
+    const hardHits = [archHit && archHit.msg, sql.hard, loopInsert, timeoutSniff.hard, datetimeHit].filter(Boolean);
     if (config.watcher === 'enforce' && hardHits.length) {
       writeHookOutput('PostToolUse', null, {
         decision: 'block',

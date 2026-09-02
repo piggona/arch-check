@@ -502,3 +502,116 @@ test('watcher(enforce): 高频写入提醒不升级为 block（NOTE 级）', () 
   assert.equal(out.decision, undefined, '高频写入提醒不应产生 decision:block');
   assert.match(out.hookSpecificOutput.additionalContext, /高频写入表提醒/);
 });
+
+// ---------- 时间字段类型嗅探（DATETIME/DATE vs TIMESTAMP） ----------
+
+test('watcher: CREATE TABLE 使用 DATETIME → 输出时间字段类型违规', () => {
+  const f = writeFixture('src/infra/migration-001.ts',
+    "const sql = `CREATE TABLE orders (\n" +
+    "  id BIGINT AUTO_INCREMENT PRIMARY KEY,\n" +
+    "  user_id BIGINT NOT NULL,\n" +
+    "  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,\n" +
+    "  updated_at DATETIME NOT NULL\n" +
+    ")`;\n" +
+    "db.execute(sql);\n");
+  const r = run('arch-watcher.js', {}, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.match(out.hookSpecificOutput.additionalContext, /时间字段类型违规|DATETIME/);
+});
+
+test('watcher: CREATE TABLE 使用 TIMESTAMP → 静默（合法）', () => {
+  const f = writeFixture('src/infra/migration-002.ts',
+    "const sql = `CREATE TABLE orders (\n" +
+    "  id BIGINT AUTO_INCREMENT PRIMARY KEY,\n" +
+    "  user_id BIGINT NOT NULL,\n" +
+    "  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,\n" +
+    "  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP\n" +
+    ")`;\n" +
+    "db.execute(sql);\n");
+  const r = run('arch-watcher.js', {}, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  // 可能有裸 SQL 提醒，但不应有时间字段类型违规
+  if (r.stdout) {
+    assert.doesNotMatch(r.stdout, /时间字段类型违规/);
+  }
+});
+
+test('watcher: ALTER TABLE ADD COLUMN 使用 DATE → 输出时间字段类型违规', () => {
+  const f = writeFixture('src/infra/migration-003.ts',
+    "db.execute('ALTER TABLE users ADD COLUMN expired_date DATE NOT NULL');\n");
+  const r = run('arch-watcher.js', {}, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.match(out.hookSpecificOutput.additionalContext, /时间字段类型违规|DATE/);
+});
+
+test('watcher: ORM Column(DateTime) → 输出时间字段类型违规', () => {
+  const f = writeFixture('src/infra/models/order.py',
+    "from sqlalchemy import Column, Integer, DateTime\n" +
+    "from sqlalchemy.sql import func\n\n" +
+    "class Order(Base):\n" +
+    "    id = Column(Integer, primary_key=True)\n" +
+    "    created_at = Column(DateTime, default=func.now())\n");
+  const r = run('arch-watcher.js', {}, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.match(out.hookSpecificOutput.additionalContext, /时间字段类型违规|DateTime/);
+});
+
+test('watcher: ORM Column(TIMESTAMP) → 静默', () => {
+  const f = writeFixture('src/infra/models/order2.py',
+    "from sqlalchemy import Column, Integer, TIMESTAMP\n" +
+    "from sqlalchemy.sql import func\n\n" +
+    "class Order(Base):\n" +
+    "    id = Column(Integer, primary_key=True)\n" +
+    "    created_at = Column(TIMESTAMP, server_default=func.now())\n");
+  const r = run('arch-watcher.js', {}, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  // 不应有时间字段类型违规
+  if (r.stdout) {
+    assert.doesNotMatch(r.stdout, /时间字段类型违规/);
+  }
+});
+
+test('watcher: TypeORM type datetime → 输出时间字段类型违规', () => {
+  const f = writeFixture('src/infra/entities/user.ts',
+    "import { Entity, Column, PrimaryGeneratedColumn } from 'typeorm';\n\n" +
+    "@Entity()\n" +
+    "export class User {\n" +
+    "  @PrimaryGeneratedColumn()\n" +
+    "  id: number;\n\n" +
+    "  @Column({ type: 'datetime' })\n" +
+    "  createdAt: Date;\n" +
+    "}\n");
+  const r = run('arch-watcher.js', {}, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.match(out.hookSpecificOutput.additionalContext, /时间字段类型违规|datetime/);
+});
+
+test('watcher: 无 DDL/ORM 上下文的 datetime 字符串 → 静默（非建表场景）', () => {
+  const f = writeFixture('src/services/formatter.ts',
+    "export function formatDate(d: Date): string {\n" +
+    "  return d.toISOString(); // format as datetime string\n" +
+    "}\n");
+  const r = run('arch-watcher.js', {}, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  // 不应有时间字段类型违规（无 DDL 上下文）
+  if (r.stdout) {
+    assert.doesNotMatch(r.stdout, /时间字段类型违规/);
+  }
+});
+
+test('watcher(enforce): DATETIME 类型升级为 block', () => {
+  const f = writeFixture('src/infra/migration-bad.ts',
+    "db.execute(`CREATE TABLE events (\n" +
+    "  id BIGINT PRIMARY KEY,\n" +
+    "  happened_at DATETIME NOT NULL\n" +
+    ")`);\n");
+  const r = run('arch-watcher.js', { ARCH_CHECK_WATCHER: 'enforce' }, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.equal(out.decision, 'block');
+  assert.match(out.reason, /时间字段类型违规|DATETIME/);
+});

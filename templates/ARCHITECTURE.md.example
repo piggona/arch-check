@@ -154,6 +154,25 @@
 | `operation_logs` | 每次 API 调用写一条 | Kafka → 批量消费 | 按天分区 |
 | `behavior_events` | 前端埋点上报 | Redis Stream → 消费者 | 按周分区 |
 
+## 时间字段类型
+
+<!-- 按项目实际的数据库和大数据平台修改；arch-check 的"时间字段类型专项"按本节执行 -->
+
+- **统一使用 `TIMESTAMP`**：数据表的所有时间字段（created_at、updated_at、
+  expired_at、started_at 等）一律使用 `TIMESTAMP` 类型，禁止 `DATETIME`/`DATE`。
+- **原因**：业务数据会流入大数据平台（Hive / Spark / Presto 等）做分析，
+  `TIMESTAMP` 可直接映射为 Hive `TIMESTAMP` 并参与时间运算，
+  `DATETIME`/`DATE` 只能映射为 `STRING`，无法直接做时间比较、区间过滤、分区裁剪。
+- **ORM 映射**：确保 ORM 模型的时间字段映射到数据库时生成 `TIMESTAMP`（非 `DATETIME`）。
+  - SQLAlchemy: `Column(TIMESTAMP, ...)`
+  - TypeORM: `@Column({ type: 'timestamp' })`
+  - Django: 需确认 migration 输出（默认 `DateTimeField` 映射 `DATETIME`）
+  - Prisma: `@db.Timestamp` 指令
+- **时区处理**：统一 UTC 存储；MySQL `TIMESTAMP` 自动按连接时区转换，
+  应用连接统一设置 `SET time_zone = '+00:00'`；PostgreSQL 推荐 `TIMESTAMPTZ`。
+- **合理例外**：MySQL `TIMESTAMP` 范围 1970~2038——超出范围的场景（如生日、
+  历史日期）可用 `DATETIME`，但需标注 `arch-debt:` 并在大数据侧做 CAST 适配。
+
 ## 架构债约定
 
 - 有意保留的架构妥协在代码处标记：`// arch-debt: <上限/风险>, <升级触发条件>, <关联>`
@@ -176,3 +195,5 @@
 /arch-check 报告中的"外部调用追踪专项"部分。
 涉及高频写入表（记录表、日志表、流水表）的写入逻辑、buffer/队列机制、
 分表/分区策略的改动：完成后重点看 /arch-check 报告中的"高频写入表专项"部分。
+涉及数据库建表（CREATE TABLE / ALTER TABLE）、ORM 模型定义、migration 中的
+时间字段类型选择：完成后重点看 /arch-check 报告中的"时间字段类型专项"部分。

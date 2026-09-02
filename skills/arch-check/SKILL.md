@@ -58,6 +58,11 @@ license: MIT
   内存 buffer flush、旁路写入等方式解耦；同时此类大数据量表**必须按时间或
   其他字段特征分表（分区）存储**，避免单表体积膨胀导致查询劣化和维护困难。
   详见"高频写入表专项"。
+- **时间字段类型**：数据表的时间字段**必须使用 `TIMESTAMP` 类型**，禁止使用
+  `DATETIME` 或 `DATE`。原因：数据导入大数据平台（Hive 等）时，`TIMESTAMP`
+  可直接映射为 Hive 的 `TIMESTAMP` 类型并参与时间运算（比较、区间过滤、
+  分区裁剪等），而 `DATETIME`/`DATE` 只能映射为 `STRING`，无法直接做逻辑运算，
+  需额外 cast 且易出错。详见"时间字段类型专项"。
 - **跟随现状**：新代码与既有分层命名/目录结构冲突时，优先质疑新代码。
 
 ## 第 1 步：圈定变更范围
@@ -104,6 +109,9 @@ git diff [--staged] -- <file>   # 逐文件细看（只看新增/修改的 impor
 11. **高频写入表触发**：变更涉及高频写入场景——任务执行记录/行为日志/
    操作流水/埋点数据/审计日志——的数据库写入逻辑，或者在请求处理主流程中
    同步写入此类记录表时，转"高频写入表专项"逐条检查。
+12. **时间字段类型触发**：变更涉及数据库 DDL（CREATE TABLE / ALTER TABLE ADD
+   COLUMN）、ORM 模型定义（model field / migration）中定义了时间/日期字段时，
+   转"时间字段类型专项"逐条检查。
 
 ### 状态同步专项：长耗时任务的竞态与中间态
 
@@ -642,6 +650,110 @@ API 调用记录表——任何"每次业务动作都写一条"且数据量随�
    );
 ```
 
+### 时间字段类型专项：TIMESTAMP 优先，禁用 DATETIME/DATE
+
+**核心要求：数据表的时间字段必须使用 `TIMESTAMP` 类型，不得使用 `DATETIME`
+或 `DATE` 类型。**
+
+**为什么**：业务数据最终会流入大数据平台（Hive / Spark / Presto / ClickHouse 等）
+做分析，类型映射是关键环节：
+- `TIMESTAMP` → Hive `TIMESTAMP`：可直接做时间比较、区间过滤、PARTITION 裁剪、
+  `datediff()`/`date_format()` 等运算，零摩擦。
+- `DATETIME` / `DATE` → Hive 只能映射为 `STRING`：无法直接做时间运算，
+  每次使用都需要 `CAST(col AS TIMESTAMP)` 或 `unix_timestamp(col, 'yyyy-MM-dd HH:mm:ss')`，
+  不仅易出错（格式不一致就静默返回 NULL），还无法利用分区裁剪优化。
+
+**适用信号**：DDL 语句（`CREATE TABLE`/`ALTER TABLE ADD COLUMN`）、ORM 模型定义
+（Django `DateTimeField`/`DateField`、TypeORM `@Column({ type: 'datetime' })`、
+SQLAlchemy `Column(DateTime)`/`Column(Date)`、JPA `@Temporal`、Prisma schema
+`DateTime` 等）、migration 文件。
+
+**触发专项时，逐问检查：**
+
+**问 1：时间字段使用的是 TIMESTAMP 类型吗？**
+- 反模式（**WARN**）：DDL 或 ORM 模型中时间字段定义为 `DATETIME` 或 `DATE`。
+  ```sql
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  updated_at DATETIME NOT NULL
+  expired_date DATE
+  ```
+- 正确做法：一律使用 `TIMESTAMP`。
+  ```sql
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+  expired_at TIMESTAMP NULL
+  ```
+- ORM 等价：确保 ORM 映射到数据库时生成的是 `TIMESTAMP` 而非 `DATETIME`。
+  不同 ORM 默认行为不同——Django `DateTimeField` 默认映射 `DATETIME`（需配置），
+  SQLAlchemy `Column(TIMESTAMP)` 需显式指定。
+
+**问 2：已有表的时间字段是否需要迁移？**
+- 如果变更涉及既有表的 ALTER TABLE，且该表已经有 `DATETIME`/`DATE` 字段，
+  建议新增的时间字段仍用 `TIMESTAMP`，并在 `arch-debt:` 中记录老字段待迁移。
+- 迁移时注意：MySQL 的 `TIMESTAMP` 范围是 `1970-01-01 00:00:01` UTC ~
+  `2038-01-19 03:14:07` UTC（32 位），如果业务确实需要超出此范围的时间
+  （如生日、历史日期），可用 `DATETIME` 但需标注原因并在大数据侧做适配。
+
+**问 3：ORM 模型的类型映射正确吗？**
+- 仅在 ORM 代码层写 `DateTimeField` / `DateTime` 不够——需确认其实际映射到
+  数据库时生成的 DDL 是 `TIMESTAMP`。检查 migration 文件或 `SHOW CREATE TABLE`。
+- NOTE：如果 ORM 层面无法直接确认映射类型（如 Django 默认映射 `DATETIME`），
+  提醒开发者检查 migration 输出。
+
+**问 4：TIMESTAMP 的时区处理正确吗？**
+- MySQL `TIMESTAMP` 自动按 `time_zone` 系统变量做存储转换（存 UTC，读时按连接
+  时区转回）——确保应用连接统一设置 `SET time_zone = '+00:00'` 或 UTC。
+- PostgreSQL `TIMESTAMP` 和 `TIMESTAMPTZ` 不同——推荐使用 `TIMESTAMPTZ`
+  （带时区），或确保全链路统一 UTC。
+- 与"任务超时设计专项"联动：时间比较统一 UTC 时钟。
+
+**示例对照**（检查时的具象参照）：
+
+```
+✗ 反例 1：DDL 使用 DATETIME
+   CREATE TABLE orders (
+     id BIGINT AUTO_INCREMENT PRIMARY KEY,
+     user_id BIGINT NOT NULL,
+     amount DECIMAL(10,2),
+     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,  -- ← 应为 TIMESTAMP
+     updated_at DATETIME NOT NULL                              -- ← 应为 TIMESTAMP
+   );
+   -- 导入 Hive 后 created_at 变成 STRING，无法直接 WHERE created_at > '2026-01-01'
+
+✗ 反例 2：ORM 模型用 DateTime 映射
+   # SQLAlchemy
+   class Order(Base):
+       created_at = Column(DateTime, default=func.now())   # 映射为 DATETIME
+   # Django
+   class Order(models.Model):
+       created_at = models.DateTimeField(auto_now_add=True) # 默认映射 DATETIME
+
+✗ 反例 3：使用 DATE 类型
+   expired_date DATE NOT NULL   -- Hive 映射为 STRING，无法 datediff()
+
+✓ 正例 1：DDL 使用 TIMESTAMP
+   CREATE TABLE orders (
+     id BIGINT AUTO_INCREMENT PRIMARY KEY,
+     user_id BIGINT NOT NULL,
+     amount DECIMAL(10,2),
+     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+   );
+
+✓ 正例 2：ORM 显式指定 TIMESTAMP
+   # SQLAlchemy
+   from sqlalchemy import TIMESTAMP
+   class Order(Base):
+       created_at = Column(TIMESTAMP, server_default=func.now())
+   # TypeORM
+   @CreateDateColumn({ type: 'timestamp' })
+   createdAt: Date;
+
+✓ 正例 3：合理例外（超出 TIMESTAMP 范围的场景，需标注）
+   # arch-debt: birthday 用 DATE 因需记录 1970 年前日期, 大数据侧已做 CAST 适配, 2027-03 复审
+   birthday DATE NULL
+```
+
 ## 第 3 步：输出报告
 
 格式（每条违规一行，按严重度分组）：
@@ -670,7 +782,8 @@ API 调用记录表——任何"每次业务动作都写一条"且数据量随�
   **调用外部服务后日志缺对方返回的响应 ID（影响跨系统排查）**、
   **高频写入表在主流程中同步 INSERT（应异步缓冲/队列解耦）**、
   **高频写入表无分表/分区策略（数据量随时间无上限增长）**、
-  **纯内存 buffer 无 shutdown drain（进程崩溃丢数据）**——
+  **纯内存 buffer 无 shutdown drain（进程崩溃丢数据）**、
+  **时间字段使用 DATETIME/DATE 而非 TIMESTAMP（大数据平台映射为 STRING）**——
   建议改，可带 `arch-debt:` 标记合入。
 - **NOTE**：值得记录但不要求本次处理（如轮询消费建议确认认领/幂等、
   日志中出现敏感凭证、集中合理使用原生复杂 SQL、ORM 大表全字段拉取）。

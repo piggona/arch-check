@@ -50,7 +50,13 @@
     此类大数据量表必须**按时间或字段分表/分区存储**（PARTITION BY RANGE/hash），
     避免单表膨胀导致查询劣化和 DDL 锁表风险。buffer 需有 shutdown drain 和
     flush 失败重试；记录表用独立连接池，不与主业务共享。
-13. **跟随现状**：新代码与既有分层结构冲突时，先质疑新代码。
+13. **时间字段类型**：数据表的时间字段**必须使用 `TIMESTAMP` 类型**，禁止
+    `DATETIME`/`DATE`。原因：数据导入大数据平台（Hive 等）时，`TIMESTAMP`
+    可直接映射为 Hive `TIMESTAMP` 并参与时间运算（比较/过滤/分区裁剪），
+    `DATETIME`/`DATE` 只能映射为 `STRING`，无法直接做逻辑运算。
+    MySQL `TIMESTAMP` 有 2038 年范围限制——超出范围的场景（如生日、历史日期）
+    可用 `DATETIME` 但需标注 `arch-debt:` 并在大数据侧做 CAST 适配。
+14. **跟随现状**：新代码与既有分层结构冲突时，先质疑新代码。
 
 ## 检查输出
 
@@ -67,7 +73,8 @@
   简单操作绕过 ORM、原生 SQL 用 SELECT *、批量写入未控制 batch size、
   超时阈值硬编码、进度刷新只更新时间戳不更新进度计数、
   外部服务调用日志缺对方响应 ID、高频写入表主流程同步 INSERT、
-  高频写入表无分表/分区策略、纯内存 buffer 无 shutdown drain，可带标记合入
+  高频写入表无分表/分区策略、纯内存 buffer 无 shutdown drain、
+  时间字段使用 DATETIME/DATE 而非 TIMESTAMP，可带标记合入
 - NOTE：记录在案，不要求本次处理
 
 暂缓修复的 WARN 在代码处标记：

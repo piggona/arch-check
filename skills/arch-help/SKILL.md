@@ -37,7 +37,10 @@ description: >
    request_id 关联，异常路径也要记，大模型调用额外记 model 和 token usage；
    高频写入表——高并发业务的高频记录表写入不能阻塞主流程（buffer flush 或
    异步队列解耦），记录与业务事务隔离，此类大表必须按时间/字段分表存储，
-   buffer 需有 shutdown drain 和 flush 失败重试，记录表用独立连接池
+   buffer 需有 shutdown drain 和 flush 失败重试，记录表用独立连接池；
+   时间字段类型——数据表时间字段必须用 TIMESTAMP，禁止 DATETIME/DATE，
+   原因是导入大数据平台（Hive 等）时 TIMESTAMP 可直接映射并参与时间运算，
+   DATETIME/DATE 只能映射为 STRING 无法做逻辑操作
 
 ## arch-debt 标记语法
 
@@ -57,7 +60,8 @@ description: >
   提醒改为批量写入并控制 batch size、超时逻辑缺保活判断或阈值硬编码——
   提醒补双窗口超时设计、外部服务调用日志缺响应 ID——
   提醒记录对方返回的唯一 ID 用于跨系统排查、主流程同步写入记录/日志类数据表——
-  提醒改为 buffer flush 或异步队列解耦并注意分表）。
+  提醒改为 buffer flush 或异步队列解耦并注意分表、DDL/ORM 模型中时间字段使用
+  DATETIME/DATE——提醒改为 TIMESTAMP 以兼容大数据平台映射）。
   提醒强度由 `ARCH_CHECK_WATCHER` 控制：`hint`（默认，仅提示）/
   `enforce`（输出阻断提醒，代理会自我修正）/ `off`
 
