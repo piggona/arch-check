@@ -340,6 +340,94 @@ function sniffDatetimeType(source) {
   return null;
 }
 
+// ---------- 数据库字段规范嗅探：FLOAT/DOUBLE 类型、列注释、前缀索引 ----------
+// FLOAT/DOUBLE 在 DDL/ORM 中是确定性违规（和 DATETIME 类似）→ hard 级，enforce 可 block。
+// 列缺 COMMENT 和缺前缀索引 → note 级（单文件无法确认全貌，只做温和提醒）。
+
+// FLOAT/DOUBLE 列类型（DDL 上下文）
+const COL_FLOAT_DOUBLE_RE = /\b(?:FLOAT|DOUBLE(?:\s+PRECISION)?)\b/i;
+// ORM 中的 Float/Double 类型映射
+const ORM_FLOAT_DOUBLE_RE = /\b(?:FloatField|DoubleField)\b|Column\s*\(\s*(?:Float|Double)\s*[,)]|type:\s*['"](?:float|double)['"]/i;
+
+function sniffFloatDouble(source) {
+  const hasDDL = DDL_CONTEXT_RE.test(source);
+  const hasORM = ORM_FLOAT_DOUBLE_RE.test(source);
+  if (!hasDDL && !hasORM) return null;
+
+  if (hasDDL && COL_FLOAT_DOUBLE_RE.test(source)) {
+    return '数据库字段规范违规[使用 FLOAT/DOUBLE 类型] — DDL 中检测到 FLOAT 或 DOUBLE 类型，' +
+      '应改为 DECIMAL。FLOAT/DOUBLE 是浮点类型，存在精度丢失问题（如 0.1+0.2≠0.3），' +
+      '不适合存储金额、数量等需要精确计算的业务数据。' +
+      '正确做法：DECIMAL(M,D)，M 为总位数，D 为小数位数。' +
+      '详见 /arch-check 数据库字段规范专项。误报则忽略。';
+  }
+
+  if (hasORM) {
+    return '数据库字段规范违规[ORM 模型使用 Float/Double 映射] — ORM 模型的数值字段应确保' +
+      '映射到数据库时生成 DECIMAL 类型（而非 FLOAT/DOUBLE）。' +
+      'SQLAlchemy 用 Column(Numeric) 或 Column(DECIMAL)，TypeORM 用 { type: "decimal" }，' +
+      'Django 用 DecimalField。FLOAT/DOUBLE 存在浮点精度问题。' +
+      '详见 /arch-check 数据库字段规范专项。误报则忽略。';
+  }
+
+  return null;
+}
+
+// 列注释检测：DDL 中 CREATE TABLE 但无 COMMENT 关键词 → note 级
+function sniffColumnComment(source) {
+  // 只有 CREATE TABLE 时才检查（ALTER TABLE ADD COLUMN 通常是单列，COMMENT 可选）
+  if (!/\bCREATE\s+TABLE\b/i.test(source)) return null;
+  // 如果文件中出现了 COMMENT 关键词，认为开发者有注释意识，静默
+  if (/\bCOMMENT\b/i.test(source)) return null;
+  return '数据库字段规范提醒[列缺少 COMMENT] — CREATE TABLE 中未见 COMMENT 定义 — ' +
+    '每个列都应有 COMMENT 注释，说明字段含义、取值范围和业务用途，' +
+    '方便后续维护和数据字典自动生成。' +
+    '详见 /arch-check 数据库字段规范专项。';
+}
+
+// 前缀索引检测：DDL 中 VARCHAR(>10) 且无前缀索引语法 → note 级
+// 前缀索引语法示例：INDEX idx_col (col(10))
+const PREFIX_INDEX_RE = /INDEX\s+\w+\s*\([^)]*\w+\s*\(\s*\d+\s*\)/i;
+
+function sniffPrefixIndex(source) {
+  if (!DDL_CONTEXT_RE.test(source)) return null;
+
+  // 检查是否存在 VARCHAR(N)，N > 10
+  let hasLongVarchar = false;
+  const re = /VARCHAR\s*\(\s*(\d+)\s*\)/gi;
+  let m;
+  while ((m = re.exec(source)) !== null) {
+    if (parseInt(m[1], 10) > 10) {
+      hasLongVarchar = true;
+      break;
+    }
+  }
+  if (!hasLongVarchar) return null;
+
+  // 已有前缀索引 → 静默
+  if (PREFIX_INDEX_RE.test(source)) return null;
+
+  return '数据库字段规范提醒[长字符串字段缺前缀索引] — DDL 中检测到 VARCHAR 长度 >10 的字段，' +
+    '但未见前缀索引定义（如 INDEX idx_col (col(10))）。' +
+    '长字符串字段建立索引时应使用前缀索引，减少索引空间占用并提升查询性能。' +
+    '前缀长度通常取 10 或根据字段选择性调优。' +
+    '详见 /arch-check 数据库字段规范专项。';
+}
+
+// ---------- 配置兼容性嗅探：修改配置文件时提醒检查向后兼容 ----------
+// 检测文件路径是否为配置文件（.env, config.*, application.*, settings.* 等）。
+// NOTE 级提醒，永不 enforce——配置兼容性是语义判断，无法从文本自动确定。
+const CONFIG_FILE_RE = /(?:^|[\\/])(?:\.env(?:\.\w+)?$|(?:config|application|settings|appsettings)\.[^/\\]+$)|\.(?:ya?ml|toml|ini|properties|conf)$/i;
+
+function sniffConfigCompat(filePath) {
+  if (!CONFIG_FILE_RE.test(filePath)) return null;
+  return '配置兼容性提醒: 检测到配置文件被修改 — 请确认本次改动向后兼容既有配置：' +
+    '新增配置项应有默认值（老版本升级时不因缺少新配置而报错）；' +
+    '修改配置项名称/格式时保留对旧名称/格式的兼容读取；' +
+    '删除配置项前确认所有环境已不再使用。' +
+    '详见 /arch-check 配置兼容性专项。';
+}
+
 // ---------- 主流程 ----------
 if (config.watcher === 'off') process.exit(0);
 
@@ -348,7 +436,20 @@ readHookInput((event) => {
     const filePath = event && event.tool_input &&
       (event.tool_input.file_path || event.tool_input.filePath);
     if (!filePath || typeof filePath !== 'string') process.exit(0);
-    if (!/\.(js|jsx|ts|tsx|mjs|cjs|py)$/.test(filePath)) process.exit(0);
+
+    // 文件类型识别：代码/SQL 文件走全部嗅探；配置文件只做兼容性提醒
+    const isCodeFile = /\.(js|jsx|ts|tsx|mjs|cjs|py|sql)$/.test(filePath);
+    const isConfigFile = CONFIG_FILE_RE.test(filePath);
+    if (!isCodeFile && !isConfigFile) process.exit(0);
+
+    // 配置文件：只输出兼容性提醒，不做代码级嗅探
+    if (isConfigFile && !isCodeFile) {
+      const configNote = sniffConfigCompat(filePath);
+      if (configNote) {
+        writeHookOutput('PostToolUse', configNote);
+      }
+      process.exit(0);
+    }
 
     const source = readSource(filePath);
     if (source === null) process.exit(0);
@@ -359,6 +460,7 @@ readHookInput((event) => {
     const loopInsert = sniffLoopInsert(source);    // 循环逐条写入（可 enforce）
     const timeoutSniff = sniffTimeoutDesign(source); // 单窗口超时（可 enforce）+ 阈值硬编码提醒
     const datetimeHit = sniffDatetimeType(source); // DATETIME/DATE 类型（可 enforce）
+    const floatDoubleHit = sniffFloatDouble(source); // FLOAT/DOUBLE 类型（可 enforce）
     const notes = [
       sniffPollingConsumer(source),                // 状态同步提醒（永不 enforce）
       sniffLogTrace(source, layer),                // 日志串联提醒（永不 enforce）
@@ -366,9 +468,12 @@ readHookInput((event) => {
       timeoutSniff.note,                           // 超时阈值硬编码提醒（永不 enforce）
       sniffExternalCallTrace(source, layer),       // 外部调用追踪提醒（永不 enforce）
       sniffHighFreqWrite(source, layer),           // 高频写入表提醒（永不 enforce）
+      sniffColumnComment(source),                  // 列缺 COMMENT 提醒（永不 enforce）
+      sniffPrefixIndex(source),                    // 长 VARCHAR 缺前缀索引提醒（永不 enforce）
+      sniffConfigCompat(filePath),                 // 配置兼容性提醒（代码文件也可能是配置）
     ].filter(Boolean);
 
-    const hardHits = [archHit && archHit.msg, sql.hard, loopInsert, timeoutSniff.hard, datetimeHit].filter(Boolean);
+    const hardHits = [archHit && archHit.msg, sql.hard, loopInsert, timeoutSniff.hard, datetimeHit, floatDoubleHit].filter(Boolean);
     if (config.watcher === 'enforce' && hardHits.length) {
       writeHookOutput('PostToolUse', null, {
         decision: 'block',

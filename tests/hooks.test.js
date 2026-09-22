@@ -615,3 +615,268 @@ test('watcher(enforce): DATETIME 类型升级为 block', () => {
   assert.equal(out.decision, 'block');
   assert.match(out.reason, /时间字段类型违规|DATETIME/);
 });
+
+// ---------- 数据库字段规范嗅探：FLOAT/DOUBLE 类型 ----------
+
+test('watcher: CREATE TABLE 使用 FLOAT → 输出字段规范违规', () => {
+  const f = writeFixture('src/infra/migration-float.ts',
+    "const sql = `CREATE TABLE products (\n" +
+    "  id BIGINT AUTO_INCREMENT PRIMARY KEY,\n" +
+    "  price FLOAT NOT NULL,\n" +
+    "  weight DOUBLE NOT NULL\n" +
+    ")` COMMENT '产品表';\n" +
+    "db.execute(sql);\n");
+  const r = run('arch-watcher.js', {}, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.match(out.hookSpecificOutput.additionalContext, /FLOAT|DOUBLE|DECIMAL/);
+});
+
+test('watcher: CREATE TABLE 使用 DECIMAL → 静默（合法）', () => {
+  const f = writeFixture('src/infra/migration-decimal.ts',
+    "const sql = `CREATE TABLE products (\n" +
+    "  id BIGINT AUTO_INCREMENT PRIMARY KEY,\n" +
+    "  price DECIMAL(10,2) NOT NULL\n" +
+    ")` COMMENT '产品表';\n" +
+    "db.execute(sql);\n");
+  const r = run('arch-watcher.js', {}, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  // 可能有裸 SQL 提醒，但不应有 FLOAT/DOUBLE 违规
+  if (r.stdout) {
+    assert.doesNotMatch(r.stdout, /FLOAT|DOUBLE|数据库字段规范违规/);
+  }
+});
+
+test('watcher: ORM Column(Float) → 输出字段规范违规', () => {
+  const f = writeFixture('src/infra/orm/product.py',
+    "from sqlalchemy import Column, Integer, Float\n\n" +
+    "class Product(Base):\n" +
+    "    id = Column(Integer, primary_key=True)\n" +
+    "    price = Column(Float)\n");
+  const r = run('arch-watcher.js', {}, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.match(out.hookSpecificOutput.additionalContext, /FLOAT|DOUBLE|Float|Double|DECIMAL/);
+});
+
+test('watcher: TypeORM type float → 输出字段规范违规', () => {
+  const f = writeFixture('src/infra/orm/product.ts',
+    "import { Entity, Column, PrimaryGeneratedColumn } from 'typeorm';\n\n" +
+    "@Entity()\n" +
+    "export class Product {\n" +
+    "  @PrimaryGeneratedColumn()\n" +
+    "  id: number;\n\n" +
+    "  @Column({ type: 'float' })\n" +
+    "  price: number;\n" +
+    "}\n");
+  const r = run('arch-watcher.js', {}, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.match(out.hookSpecificOutput.additionalContext, /FLOAT|DOUBLE|Float|Double|DECIMAL/);
+});
+
+test('watcher: parseFloat() 无 DDL 上下文 → 静默（不误伤）', () => {
+  const f = writeFixture('src/services/parser.ts',
+    "export function parse(s: string) {\n" +
+    "  return parseFloat(s);\n" +
+    "}\n");
+  const r = run('arch-watcher.js', {}, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  if (r.stdout) {
+    assert.doesNotMatch(r.stdout, /数据库字段规范违规/);
+  }
+});
+
+test('watcher(enforce): FLOAT/DOUBLE 升级为 block', () => {
+  const f = writeFixture('src/infra/migration-float-bad.ts',
+    "db.execute(`CREATE TABLE metrics (\n" +
+    "  id BIGINT PRIMARY KEY,\n" +
+    "  value DOUBLE NOT NULL\n" +
+    ")`);\n");
+  const r = run('arch-watcher.js', { ARCH_CHECK_WATCHER: 'enforce' }, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.equal(out.decision, 'block');
+  assert.match(out.reason, /FLOAT|DOUBLE|DECIMAL|数据库字段规范/);
+});
+
+// ---------- 数据库字段规范嗅探：列缺 COMMENT ----------
+
+test('watcher: CREATE TABLE 无 COMMENT → 输出列缺注释提醒', () => {
+  const f = writeFixture('src/infra/migration-nocomment.ts',
+    "db.execute(`CREATE TABLE users (\n" +
+    "  id BIGINT AUTO_INCREMENT PRIMARY KEY,\n" +
+    "  name VARCHAR(50) NOT NULL,\n" +
+    "  email VARCHAR(100) NOT NULL\n" +
+    ")`);\n");
+  const r = run('arch-watcher.js', {}, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.match(out.hookSpecificOutput.additionalContext, /COMMENT|列缺少/);
+});
+
+test('watcher: CREATE TABLE 有 COMMENT → 不输出列缺注释提醒', () => {
+  const f = writeFixture('src/infra/migration-comment.ts',
+    "db.execute(`CREATE TABLE users (\n" +
+    "  id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '主键',\n" +
+    "  name VARCHAR(50) NOT NULL COMMENT '用户名'\n" +
+    ")`);\n");
+  const r = run('arch-watcher.js', {}, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  if (r.stdout) {
+    assert.doesNotMatch(r.stdout, /列缺少 COMMENT/);
+  }
+});
+
+test('watcher: 无 CREATE TABLE 上下文 → 不触发列注释检查', () => {
+  const f = writeFixture('src/services/comment-svc.ts',
+    "// This is a comment about the service\n" +
+    "export function getComments() { return []; }\n");
+  const r = run('arch-watcher.js', {}, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  if (r.stdout) {
+    assert.doesNotMatch(r.stdout, /列缺少 COMMENT/);
+  }
+});
+
+test('watcher(enforce): 列缺 COMMENT 不升级为 block（NOTE 级）', () => {
+  const f = writeFixture('src/infra/migration-nocomment2.ts',
+    "db.execute(`CREATE TABLE orders (\n" +
+    "  id BIGINT PRIMARY KEY,\n" +
+    "  amount DECIMAL(10,2)\n" +
+    ")`);\n");
+  const r = run('arch-watcher.js', { ARCH_CHECK_WATCHER: 'enforce' }, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.equal(out.decision, undefined, '列缺 COMMENT 提醒不应产生 decision:block');
+  assert.match(out.hookSpecificOutput.additionalContext, /COMMENT|列缺少/);
+});
+
+// ---------- 数据库字段规范嗅探：前缀索引 ----------
+
+test('watcher: VARCHAR(50) 无前缀索引 → 输出前缀索引提醒', () => {
+  const f = writeFixture('src/infra/migration-noprefix.ts',
+    "db.execute(`CREATE TABLE users (\n" +
+    "  id BIGINT AUTO_INCREMENT PRIMARY KEY,\n" +
+    "  name VARCHAR(50) NOT NULL,\n" +
+    "  INDEX idx_name (name)\n" +
+    ")`);\n");
+  const r = run('arch-watcher.js', {}, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.match(out.hookSpecificOutput.additionalContext, /前缀索引/);
+});
+
+test('watcher: VARCHAR(50) 有前缀索引 → 不输出前缀索引提醒', () => {
+  const f = writeFixture('src/infra/migration-prefix.ts',
+    "db.execute(`CREATE TABLE users (\n" +
+    "  id BIGINT AUTO_INCREMENT PRIMARY KEY,\n" +
+    "  name VARCHAR(50) NOT NULL,\n" +
+    "  INDEX idx_name (name(10))\n" +
+    ")`);\n");
+  const r = run('arch-watcher.js', {}, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  if (r.stdout) {
+    assert.doesNotMatch(r.stdout, /前缀索引/);
+  }
+});
+
+test('watcher: VARCHAR(8) 无前缀索引 → 静默（长度 ≤10 不要求）', () => {
+  const f = writeFixture('src/infra/migration-short.ts',
+    "db.execute(`CREATE TABLE codes (\n" +
+    "  id BIGINT AUTO_INCREMENT PRIMARY KEY,\n" +
+    "  code VARCHAR(8) NOT NULL,\n" +
+    "  INDEX idx_code (code)\n" +
+    ")`);\n");
+  const r = run('arch-watcher.js', {}, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  if (r.stdout) {
+    assert.doesNotMatch(r.stdout, /前缀索引/);
+  }
+});
+
+test('watcher(enforce): 前缀索引提醒不升级为 block（NOTE 级）', () => {
+  const f = writeFixture('src/infra/migration-noprefix2.ts',
+    "db.execute(`CREATE TABLE products (\n" +
+    "  id BIGINT PRIMARY KEY,\n" +
+    "  sku VARCHAR(100) NOT NULL\n" +
+    ")`);\n");
+  const r = run('arch-watcher.js', { ARCH_CHECK_WATCHER: 'enforce' }, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.equal(out.decision, undefined, '前缀索引提醒不应产生 decision:block');
+  assert.match(out.hookSpecificOutput.additionalContext, /前缀索引/);
+});
+
+// ---------- 配置兼容性嗅探 ----------
+
+test('watcher: 修改 .env 文件 → 输出配置兼容性提醒', () => {
+  const f = writeFixture('.env',
+    "DB_HOST=localhost\nDB_PORT=3306\n");
+  const r = run('arch-watcher.js', {}, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.match(out.hookSpecificOutput.additionalContext, /配置兼容性提醒/);
+});
+
+test('watcher: 修改 config.yaml → 输出配置兼容性提醒', () => {
+  const f = writeFixture('config/config.yaml',
+    "server:\n  port: 8080\n  host: 0.0.0.0\n");
+  const r = run('arch-watcher.js', {}, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.match(out.hookSpecificOutput.additionalContext, /配置兼容性提醒/);
+});
+
+test('watcher: 修改 application.properties → 输出配置兼容性提醒', () => {
+  const f = writeFixture('src/main/resources/application.properties',
+    "spring.datasource.url=jdbc:mysql://localhost:3306/db\n");
+  const r = run('arch-watcher.js', {}, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.match(out.hookSpecificOutput.additionalContext, /配置兼容性提醒/);
+});
+
+test('watcher: 修改普通 .ts 文件 → 不输出配置兼容性提醒', () => {
+  const f = writeFixture('src/services/user.ts',
+    "export function getUser(id: number) { return null; }\n");
+  const r = run('arch-watcher.js', {}, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  if (r.stdout) {
+    assert.doesNotMatch(r.stdout, /配置兼容性提醒/);
+  }
+});
+
+test('watcher(enforce): 配置兼容性提醒不升级为 block（NOTE 级）', () => {
+  const f = writeFixture('.env.production',
+    "API_KEY=xxx\nDATABASE_URL=postgres://...\n");
+  const r = run('arch-watcher.js', { ARCH_CHECK_WATCHER: 'enforce' }, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.equal(out.decision, undefined, '配置兼容性提醒不应产生 decision:block');
+  assert.match(out.hookSpecificOutput.additionalContext, /配置兼容性提醒/);
+});
+
+// ---------- .sql 文件支持 ----------
+
+test('watcher: .sql 文件中的 FLOAT → 输出字段规范违规', () => {
+  const f = writeFixture('migrations/001_create_products.sql',
+    "CREATE TABLE products (\n" +
+    "  id BIGINT AUTO_INCREMENT PRIMARY KEY,\n" +
+    "  price FLOAT NOT NULL,\n" +
+    "  name VARCHAR(100) NOT NULL\n" +
+    ") COMMENT '产品表';\n");
+  const r = run('arch-watcher.js', {}, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.match(out.hookSpecificOutput.additionalContext, /FLOAT|DOUBLE|DECIMAL|数据库字段规范/);
+});
+
+test('watcher: .sql 文件中的 DATETIME → 输出时间字段类型违规', () => {
+  const f = writeFixture('migrations/002_add_time.sql',
+    "ALTER TABLE products ADD COLUMN created_at DATETIME NOT NULL;\n");
+  const r = run('arch-watcher.js', {}, evt(f));
+  assert.equal(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.match(out.hookSpecificOutput.additionalContext, /时间字段类型违规|DATETIME/);
+});

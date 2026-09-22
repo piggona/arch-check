@@ -63,6 +63,16 @@ license: MIT
   可直接映射为 Hive 的 `TIMESTAMP` 类型并参与时间运算（比较、区间过滤、
   分区裁剪等），而 `DATETIME`/`DATE` 只能映射为 `STRING`，无法直接做逻辑运算，
   需额外 cast 且易出错。详见"时间字段类型专项"。
+- **数据库字段规范**：新增或修改数据库表时——①字符串字段长度超过 10 的
+  **必须使用前缀索引**（`INDEX idx_col (col(10))`），不得建全长度索引；
+  ②每个列**必须有 `COMMENT` 注释**，说明字段含义和取值范围；
+  ③**禁止使用 `FLOAT`/`DOUBLE` 类型**，一律改为 `DECIMAL(M,D)`——浮点类型
+  存在精度丢失问题（0.1+0.2≠0.3），不适合业务精确计算。
+  详见"数据库字段规范专项"。
+- **配置兼容性**：代码改动包含配置修改时（`.env`、`config.yaml`、
+  `application.properties` 等配置文件，或代码中的配置读取/定义逻辑），
+  必须确认**向后兼容**既有配置：新增配置项有默认值、修改配置项保留旧名称
+  兼容读取、删除配置项前确认无环境在用。详见"配置兼容性专项"。
 - **跟随现状**：新代码与既有分层命名/目录结构冲突时，优先质疑新代码。
 
 ## 第 1 步：圈定变更范围
@@ -112,6 +122,14 @@ git diff [--staged] -- <file>   # 逐文件细看（只看新增/修改的 impor
 12. **时间字段类型触发**：变更涉及数据库 DDL（CREATE TABLE / ALTER TABLE ADD
    COLUMN）、ORM 模型定义（model field / migration）中定义了时间/日期字段时，
    转"时间字段类型专项"逐条检查。
+13. **数据库字段规范触发**：变更涉及数据库 DDL（CREATE TABLE / ALTER TABLE）、
+   ORM 模型定义中有数值字段（FLOAT/DOUBLE/Float/Double）、字符串字段
+   （VARCHAR/CHAR）、或列定义时，转"数据库字段规范专项"逐条检查。
+14. **配置兼容性触发**：变更涉及配置文件（`.env`、`*.yaml`/`*.yml`、
+   `*.properties`、`*.toml`、`*.ini`、`config.*`、`application.*`、
+   `settings.*`）的修改，或代码中配置读取/定义逻辑（`process.env`、
+   `os.environ`、`@Value`、`ConfigService`）发生变化时，
+   转"配置兼容性专项"逐条检查。
 
 ### 状态同步专项：长耗时任务的竞态与中间态
 
@@ -754,6 +772,196 @@ SQLAlchemy `Column(DateTime)`/`Column(Date)`、JPA `@Temporal`、Prisma schema
    birthday DATE NULL
 ```
 
+### 数据库字段规范专项：前缀索引、列注释、DECIMAL 替代 FLOAT/DOUBLE
+
+**核心要求：新增或修改数据库表时，字符串字段长度 >10 必须建前缀索引，
+每个列必须有 COMMENT，数值字段禁止 FLOAT/DOUBLE 一律用 DECIMAL。**
+
+**适用信号**：DDL 语句（`CREATE TABLE`/`ALTER TABLE`）、ORM 模型定义
+（migration / model field）中出现 `VARCHAR`/`CHAR`/`FLOAT`/`DOUBLE`/
+`FloatField`/`DoubleField` 等类型。
+
+**触发专项时，逐问检查：**
+
+**问 1：FLOAT/DOUBLE 是否替换为 DECIMAL？**
+- 反模式（**WARN**）：列定义为 `FLOAT`、`DOUBLE` 或 `DOUBLE PRECISION`。
+  ```sql
+  price FLOAT NOT NULL
+  weight DOUBLE NOT NULL
+  ```
+- 为什么：`FLOAT`/`DOUBLE` 是 IEEE 754 浮点类型，存在精度丢失——
+  `0.1 + 0.2 = 0.30000000000000004`，金额/数量/费率等需要精确计算的
+  业务数据用浮点存储会累计误差，导致对账/结算/计费等场景出错。
+- 正确做法：一律使用 `DECIMAL(M,D)`，M 为总位数，D 为小数位数。
+  ```sql
+  price DECIMAL(10,2) NOT NULL    -- 总 10 位，小数 2 位
+  weight DECIMAL(8,3) NOT NULL    -- 总 8 位，小数 3 位
+  ```
+- ORM 等价：SQLAlchemy `Column(Numeric(10,2))` 或 `Column(DECIMAL(10,2))`；
+  TypeORM `{ type: 'decimal', precision: 10, scale: 2 }`；
+  Django `DecimalField(max_digits=10, decimal_places=2)`。
+- 合理例外（NOTE）：科学计算/统计分析场景中精度要求低但范围极大的字段
+  （如传感器原始读数），可用 `FLOAT` 但需标注 `arch-debt:` 说明理由。
+
+**问 2：每个列都有 COMMENT 吗？**
+- 反模式（**WARN**）：`CREATE TABLE` 中的列定义没有 `COMMENT` 注释。
+  ```sql
+  CREATE TABLE users (
+    id BIGINT PRIMARY KEY,
+    name VARCHAR(50),          -- 缺 COMMENT：name 是什么？昵称？真名？登录名？
+    status TINYINT             -- 缺 COMMENT：status 取值范围是什么？
+  );
+  ```
+- 为什么：缺少注释会导致后续维护人员无法理解字段语义，增加沟通成本；
+  数据字典自动生成工具也依赖 COMMENT 生成文档。
+- 正确做法：每个列都加 `COMMENT`，说明字段含义、取值范围和业务用途。
+  ```sql
+  CREATE TABLE users (
+    id BIGINT PRIMARY KEY COMMENT '用户唯一 ID',
+    name VARCHAR(50) NOT NULL COMMENT '用户显示名称（昵称）',
+    status TINYINT NOT NULL DEFAULT 1 COMMENT '账号状态: 0=禁用, 1=正常, 2=待审核'
+  ) COMMENT '用户基础信息表';
+  ```
+- ORM 等价：各 ORM 的 `comment` 参数——SQLAlchemy `Column(..., comment='...')`；
+  TypeORM `@Column({ comment: '...' })`；Django `help_text` + migration 注释。
+
+**问 3：长字符串字段是否使用了前缀索引？**
+- 反模式（**WARN**）：`VARCHAR(N)` 其中 N > 10 的字段建了全长度索引。
+  ```sql
+  name VARCHAR(100) NOT NULL,
+  INDEX idx_name (name)          -- 全长度索引，索引空间浪费
+  ```
+- 为什么：长字符串的全长度索引占用大量磁盘空间，B+ 树节点容纳的 key 少，
+  树深增加，查询和维护成本都更高。实际业务中，前缀通常已有足够的选择性。
+- 正确做法：使用前缀索引，前缀长度取 10（或根据选择性调优）。
+  ```sql
+  name VARCHAR(100) NOT NULL,
+  INDEX idx_name (name(10))      -- 前缀索引，通常够用
+  ```
+- 选择性调优：`SELECT COUNT(DISTINCT LEFT(col, N)) / COUNT(*) FROM table`，
+  N 取不同值比较选择性比，选择性 > 0.9 通常足够。
+- 合理例外（NOTE）：需要 ORDER BY 或 GROUP BY 的字段（前缀索引不支持排序）；
+  UNIQUE 约束的字段（前缀索引无法保证唯一性）——需标注理由。
+
+**问 4（ORM 场景）：模型字段的数据库映射类型正确吗？**
+- ORM 层面定义的字段类型不一定等于数据库实际类型——需检查 migration 输出。
+- SQLAlchemy `Column(Float)` 默认映射为 `FLOAT`——应改为 `Column(Numeric(M,D))`。
+- Django `FloatField` 映射为 `DOUBLE PRECISION`——应改为 `DecimalField`。
+- TypeORM `{ type: 'float' }` 映射为 `FLOAT`——应改为 `{ type: 'decimal' }`。
+
+**示例对照**（检查时的具象参照）：
+
+```
+✗ 反例 1：使用 FLOAT/DOUBLE
+   price FLOAT NOT NULL,                        -- 浮点精度丢失
+   ratio DOUBLE NOT NULL                        -- 浮点精度丢失
+
+✗ 反例 2：列缺 COMMENT
+   CREATE TABLE orders (
+     id BIGINT PRIMARY KEY,                     -- 没有 COMMENT
+     amount DECIMAL(10,2)                       -- 没有 COMMENT
+   );
+
+✗ 反例 3：长 VARCHAR 全长度索引
+   email VARCHAR(200) NOT NULL,
+   INDEX idx_email (email)                      -- 200 字节全长度索引
+
+✓ 正例：
+   CREATE TABLE orders (
+     id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '订单 ID',
+     user_id BIGINT NOT NULL COMMENT '下单用户 ID',
+     amount DECIMAL(10,2) NOT NULL COMMENT '订单金额（元）',
+     email VARCHAR(200) NOT NULL COMMENT '收件人邮箱',
+     INDEX idx_email (email(10)),               -- 前缀索引
+     INDEX idx_user_id (user_id)                -- 整数字段无需前缀
+   ) COMMENT '订单主表';
+```
+
+### 配置兼容性专项：配置修改的向后兼容
+
+**核心要求：代码改动涉及配置修改时，必须确认向后兼容——老版本配置文件能在
+新代码上正常工作，新代码部署后不会因配置格式/名称变化而故障。**
+
+**适用信号**：修改配置文件（`.env`、`*.yaml`/`*.yml`、`*.properties`、`*.toml`、
+`*.ini`、`config.*`、`application.*`、`settings.*`）；修改代码中配置读取逻辑
+（`process.env.XXX`、`os.environ`、`@Value`、`ConfigService`、`viper.Get`）；
+修改配置类/结构体定义。
+
+**为什么**：配置不兼容是灰度发布和滚动升级时的常见事故源——新旧版本共存期间
+（蓝绿部署、金丝雀发布、多机房分批），部分实例读到新配置、部分读到旧配置，
+如果新配置不向后兼容，旧版本实例就会报错/崩溃。
+
+**触发专项时，逐问检查：**
+
+**问 1：新增的配置项有默认值吗？**
+- 反模式（**WARN**）：新增了配置项但代码中读取时没有提供默认值——
+  老版本的配置文件里没有这个项，新代码部署后读不到就报错。
+  ```javascript
+  // 危险：老配置文件没有 NEW_FEATURE_ENABLED，直接崩
+  const enabled = config.get('NEW_FEATURE_ENABLED');
+  ```
+- 正确做法：新增配置项**必须有默认值**，默认值应保持与改动前的行为一致
+  （即默认关闭新功能，或默认使用旧行为）。
+  ```javascript
+  const enabled = config.get('NEW_FEATURE_ENABLED', false);  // 默认 false = 老行为
+  ```
+- 配置文件中新增项旁边应注释说明：用途、默认值、可选值。
+
+**问 2：修改的配置项保持了旧名称兼容吗？**
+- 反模式（**WARN**）：直接把配置项改名（`DB_HOST` → `DATABASE_HOST`），
+  老配置文件还是 `DB_HOST`，新代码只读 `DATABASE_HOST` → 连不上数据库。
+- 正确做法：保留旧名称的兼容读取，新旧名称并存过渡。
+  ```javascript
+  const dbHost = config.get('DATABASE_HOST') || config.get('DB_HOST') || 'localhost';
+  ```
+- 过渡期后可以在下一版本发 deprecation warning，再下一版本才移除旧名称。
+
+**问 3：修改配置格式时兼容了旧格式吗？**
+- 反模式（**WARN**）：配置值的格式变了（`timeout=30` → `timeout=30s`，
+  或 JSON 结构调整），老配置文件的旧格式在新代码中解析失败。
+- 正确做法：配置解析代码应能处理新旧两种格式（或自动转换）。
+  ```javascript
+  // 兼容新旧格式：数字（秒）或带单位字符串
+  const raw = config.get('TIMEOUT', '30');
+  const timeoutSec = typeof raw === 'number' ? raw : parseDuration(raw);
+  ```
+
+**问 4：删除的配置项确认无人使用了吗？**
+- 反模式（**BLOCKER**）：删除了配置项，但有其他服务/环境还在提供这个配置，
+  且旧版本代码还在读取它——删除后旧版本报错。
+- 正确做法：分步删除——先让代码忽略该配置（读取时给默认值），部署完全
+  滚动完毕后，再清理配置文件中的旧项。
+- 删除前检查：`grep -r 'CONFIG_KEY'` 确认所有代码路径都不再依赖。
+
+**示例对照**（检查时的具象参照）：
+
+```
+✗ 反例 1：新增配置项无默认值
+   # .env 新增
+   CACHE_TTL=300
+   # 代码读取（老实例没有这个配置 → crash）
+   ttl = int(os.environ['CACHE_TTL'])
+
+✗ 反例 2：配置改名不兼容
+   # 旧: DB_HOST=localhost     新: DATABASE_HOST=localhost
+   db_host = os.environ['DATABASE_HOST']  # 老配置文件只有 DB_HOST → KeyError
+
+✗ 反例 3：配置格式变更不兼容
+   # 旧: TIMEOUT=30            新: TIMEOUT=30s
+   timeout = int(config['TIMEOUT'])       # "30s" → ValueError
+
+✓ 正例：向后兼容的配置修改
+   # 新增：有默认值
+   CACHE_TTL = int(os.environ.get('CACHE_TTL', '60'))
+
+   # 改名：新旧并存
+   DB_HOST = os.environ.get('DATABASE_HOST') or os.environ.get('DB_HOST', 'localhost')
+
+   # 格式变更：兼容处理
+   raw_timeout = os.environ.get('TIMEOUT', '30')
+   TIMEOUT = parse_duration(raw_timeout) if isinstance(raw_timeout, str) and not raw_timeout.isdigit() else int(raw_timeout)
+```
+
 ## 第 3 步：输出报告
 
 格式（每条违规一行，按严重度分组）：
@@ -771,7 +979,8 @@ SQLAlchemy `Column(DateTime)`/`Column(Date)`、JPA `@Temporal`、Prisma schema
   **长耗时任务只有一个超时维度（缺总超时或缺进度保活超时）**、
   **超时判断逻辑用单条件（没有保活判断）或存在时钟不一致**、
   **调用核心外部服务（大模型等）日志中无响应 ID 且无本地 request_id 关联**、
-  **高频记录表写入与主业务在同一事务（记录失败导致业务回滚）**——
+  **高频记录表写入与主业务在同一事务（记录失败导致业务回滚）**、
+  **删除配置项但有其他服务/旧版本仍在使用**——
   不合就不能合入。
 - **WARN**：跨模块直达内部、过度抽象、现状不一致、暴露中间态但下游暂未消费、
   事务外发布完成事件、request_id 靠层层手工传参、涉用户日志缺 user_id、
@@ -783,7 +992,11 @@ SQLAlchemy `Column(DateTime)`/`Column(Date)`、JPA `@Temporal`、Prisma schema
   **高频写入表在主流程中同步 INSERT（应异步缓冲/队列解耦）**、
   **高频写入表无分表/分区策略（数据量随时间无上限增长）**、
   **纯内存 buffer 无 shutdown drain（进程崩溃丢数据）**、
-  **时间字段使用 DATETIME/DATE 而非 TIMESTAMP（大数据平台映射为 STRING）**——
+  **时间字段使用 DATETIME/DATE 而非 TIMESTAMP（大数据平台映射为 STRING）**、
+  **数值字段使用 FLOAT/DOUBLE 而非 DECIMAL（浮点精度丢失）**、
+  **列定义缺少 COMMENT 注释**、**长字符串字段（VARCHAR >10）使用全长度索引
+  而非前缀索引**、**新增配置项无默认值**、**配置项改名不保留旧名称兼容**、
+  **配置格式变更不兼容旧格式**——
   建议改，可带 `arch-debt:` 标记合入。
 - **NOTE**：值得记录但不要求本次处理（如轮询消费建议确认认领/幂等、
   日志中出现敏感凭证、集中合理使用原生复杂 SQL、ORM 大表全字段拉取）。

@@ -92,6 +92,18 @@ infra/          12      DB/HTTP 适配
    原因：数据导入大数据平台（Hive 等）时，`TIMESTAMP` 可直接映射并参与时间运算，
    `DATETIME`/`DATE` 只能映射为 `STRING` 无法做逻辑操作。
    详细判定标准见 arch-check 技能的"时间字段类型专项"。
+13. **数据库字段规范**：搜索全库 DDL 和 ORM 模型定义，检查三项——
+   ① `FLOAT`/`DOUBLE` 类型字段清单（应改为 `DECIMAL`，浮点精度丢失）；
+   ② 列是否有 `COMMENT` 注释（抽样建表语句，统计有 COMMENT 的列占比）；
+   ③ `VARCHAR(N)` 中 N>10 的字段是否使用前缀索引（`INDEX idx(col(N))`）
+   而非全长度索引。
+   详细判定标准见 arch-check 技能的"数据库字段规范专项"。
+14. **配置兼容性**：搜索全库配置文件（`.env*`、`config.*`、`application.*`、
+   `settings.*`、`*.yaml`/`*.yml`/`*.properties`/`*.toml`/`*.ini`）和配置读取
+   代码（`process.env`/`os.environ`/`@Value`/`ConfigService`/`viper.Get`），
+   检查：新增配置项是否有默认值（无默认值 = 老实例升级崩溃）；是否存在
+   配置改名但未保留旧名称兼容读取的情况；配置格式变更是否兼容旧格式。
+   详细判定标准见 arch-check 技能的"配置兼容性专项"。
 
 ## 第 3 步：输出报告
 

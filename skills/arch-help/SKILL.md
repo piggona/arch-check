@@ -40,7 +40,11 @@ description: >
    buffer 需有 shutdown drain 和 flush 失败重试，记录表用独立连接池；
    时间字段类型——数据表时间字段必须用 TIMESTAMP，禁止 DATETIME/DATE，
    原因是导入大数据平台（Hive 等）时 TIMESTAMP 可直接映射并参与时间运算，
-   DATETIME/DATE 只能映射为 STRING 无法做逻辑操作
+   DATETIME/DATE 只能映射为 STRING 无法做逻辑操作；
+   数据库字段规范——VARCHAR 长度 >10 必须前缀索引、每列必须有 COMMENT、
+   禁止 FLOAT/DOUBLE 改用 DECIMAL（浮点精度丢失不适合业务计算）；
+   配置兼容性——配置修改必须向后兼容，新增配置有默认值、改名保留旧名称、
+   格式变更兼容旧格式、删除前确认无人使用
 
 ## arch-debt 标记语法
 
@@ -61,7 +65,10 @@ description: >
   提醒补双窗口超时设计、外部服务调用日志缺响应 ID——
   提醒记录对方返回的唯一 ID 用于跨系统排查、主流程同步写入记录/日志类数据表——
   提醒改为 buffer flush 或异步队列解耦并注意分表、DDL/ORM 模型中时间字段使用
-  DATETIME/DATE——提醒改为 TIMESTAMP 以兼容大数据平台映射）。
+  DATETIME/DATE——提醒改为 TIMESTAMP 以兼容大数据平台映射、DDL/ORM 中数值字段
+  使用 FLOAT/DOUBLE——提醒改为 DECIMAL 避免浮点精度丢失、CREATE TABLE 中列缺少
+  COMMENT——提醒每列都加注释、VARCHAR(>10) 字段缺前缀索引——提醒使用前缀索引、
+  修改配置文件（.env/yaml/properties 等）——提醒确认向后兼容既有配置）。
   提醒强度由 `ARCH_CHECK_WATCHER` 控制：`hint`（默认，仅提示）/
   `enforce`（输出阻断提醒，代理会自我修正）/ `off`
 

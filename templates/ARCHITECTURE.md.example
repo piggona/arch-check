@@ -154,6 +154,46 @@
 | `operation_logs` | 每次 API 调用写一条 | Kafka → 批量消费 | 按天分区 |
 | `behavior_events` | 前端埋点上报 | Redis Stream → 消费者 | 按周分区 |
 
+## 数据库字段规范
+
+<!-- 按项目实际的数据库和索引策略修改；arch-check 的"数据库字段规范专项"按本节执行 -->
+
+- **禁止 FLOAT/DOUBLE**：数值字段一律使用 `DECIMAL(M,D)`（M 总位数，D 小数位数），
+  禁止 `FLOAT` 和 `DOUBLE`——浮点类型存在精度丢失，不适合金额/数量等精确计算。
+  合理例外（科学计算/传感器读数等低精度大范围场景）需标注 `arch-debt:` 说明理由。
+- **每列必须有 COMMENT**：`CREATE TABLE` 中每个列都加 `COMMENT '说明'`，
+  包括字段含义、取值范围和业务用途（如 `status TINYINT COMMENT '状态: 0=禁用, 1=正常'`）。
+- **长字符串前缀索引**：`VARCHAR(N)` 中 N > 10 的字段建索引时使用前缀索引
+  `INDEX idx_col (col(10))`，不建全长度索引——减少索引空间占用，提升查询性能。
+  前缀长度根据选择性调优（`SELECT COUNT(DISTINCT LEFT(col, N)) / COUNT(*)`）。
+  需 UNIQUE 约束或 ORDER BY 的场景例外，需标注理由。
+- **ORM 映射检查**：确保 ORM 模型的数值字段映射到数据库时生成 `DECIMAL`
+  （而非 `FLOAT`/`DOUBLE`）。各 ORM 参考：
+  - SQLAlchemy: `Column(Numeric(10,2))` 或 `Column(DECIMAL(10,2))`
+  - TypeORM: `{ type: 'decimal', precision: 10, scale: 2 }`
+  - Django: `DecimalField(max_digits=10, decimal_places=2)`
+
+## 配置兼容性
+
+<!-- 按项目实际的配置管理方式修改；arch-check 的"配置兼容性专项"按本节执行 -->
+
+- **新增配置项有默认值**：任何新增的配置项在代码读取时必须提供默认值，
+  且默认值保持与改动前的行为一致（默认关闭新功能 / 默认使用旧行为），
+  确保老版本配置文件在新代码上正常工作。
+- **配置改名保留兼容**：重命名配置项时，新旧名称并存过渡（先读新名称，
+  fallback 到旧名称），过渡期发 deprecation warning，下一版本再移除旧名称。
+- **配置格式变更兼容**：修改配置值的格式时（如数字 → 带单位字符串），
+  解析代码应能处理新旧两种格式。
+- **删除配置项分步执行**：先让代码不再依赖该配置（读取给默认值），
+  全量部署完毕后再从配置文件中清理旧项。删除前 grep 全库确认无引用。
+- **配置文件清单**（维护点——按项目实际填写）：
+
+| 配置文件 | 用途 | 格式 |
+|---|---|---|
+| `.env` / `.env.*` | 环境变量 | KEY=VALUE |
+| `config/config.yaml` | 应用配置 | YAML |
+| `application.properties` | Spring Boot 配置 | properties |
+
 ## 时间字段类型
 
 <!-- 按项目实际的数据库和大数据平台修改；arch-check 的"时间字段类型专项"按本节执行 -->
@@ -197,3 +237,7 @@
 分表/分区策略的改动：完成后重点看 /arch-check 报告中的"高频写入表专项"部分。
 涉及数据库建表（CREATE TABLE / ALTER TABLE）、ORM 模型定义、migration 中的
 时间字段类型选择：完成后重点看 /arch-check 报告中的"时间字段类型专项"部分。
+涉及数据库字段定义（数值类型、字符串类型、索引、列注释）：完成后重点看
+/arch-check 报告中的"数据库字段规范专项"部分。
+涉及配置文件修改（.env、yaml、properties 等）或配置读取逻辑变更：
+完成后重点看 /arch-check 报告中的"配置兼容性专项"部分。
