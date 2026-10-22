@@ -10,6 +10,7 @@
 | 全库审计 | `/arch-audit` | 分层地图 + 七项体检 + 三行结论 |
 | 架构债台账 | `/arch-debt` | 收割全库 `arch-debt:` 注释，标注在期/到期/no-trigger |
 | **交付文档** | `/handoff [feature\|bugfix\|script]` | 对话结束后自动判断任务类型并生成交付文档 |
+| **CNB Issue** | `/cnb-issue [<repo>] [--dry-run]` | 从当前代码提交生成需求 Issue 单并上传 CNB（默认 `genie/genie`，需 CNB MCP） |
 | 速查 | `/arch-help` | 命令、标记语法、配置项 |
 | 自动嗅探 | 钩子（免操作） | 会话启动注入架构意识；每次写/改文件后 50ms 内嗅探常见违规 |
 | 专职审查员 | `@arch-reviewer` | 子代理（仅 Claude），多文件重构后整体把关 |
@@ -53,7 +54,7 @@ npm test && npm run validate                # 跑测试与结构校验
 ```
 适配层  .claude-plugin/ · .codex-plugin/ · AGENTS.md（薄清单，只做指向）
 逻辑层  hooks/arch-runtime.js（宿主探测+输出协议） · arch-activate.js · arch-watcher.js
-内容层  skills/×5（arch-check · audit · debt · help · handoff）· commands/×5（md+toml 双格式）
+内容层  skills/×6（arch-check · audit · debt · help · handoff · cnb-issue）· commands/×6（md+toml 双格式）
 ```
 
 ## 定制成你自己的

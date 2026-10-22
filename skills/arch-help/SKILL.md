@@ -15,6 +15,7 @@ description: >
 | `/arch-audit` | 全库架构审计，产出健康报告 |
 | `/arch-debt` | 收割 `arch-debt:` 标记 → 架构债台账 |
 | `/handoff [feature\|bugfix\|script]` | 对话结束后生成交付文档（自动判断任务类型） |
+| `/cnb-issue [<repo>] [--dry-run]` | 从代码提交生成需求 Issue 单并上传 CNB（默认 genie/genie，需 CNB MCP） |
 | `/arch-help` | 本速查 |
 
 ## 规则来源优先级

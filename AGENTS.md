@@ -99,6 +99,8 @@
 ## 命令
 
 `/arch-check [staged|branch|<range>]` 变更级检查 · `/arch-audit` 全库审计 ·
-`/arch-debt` 债务台账 · `/arch-help` 速查
+`/arch-debt` 债务台账 · `/handoff [feature|bugfix|script]` 交付文档 ·
+`/cnb-issue [<repo>] [--dry-run]` 从代码提交生成需求 Issue 单并上传 CNB（默认 genie/genie）·
+`/arch-help` 速查
 
 （本文件同样约束参与 arch-check 仓库开发的代理。尤其是他们。）
