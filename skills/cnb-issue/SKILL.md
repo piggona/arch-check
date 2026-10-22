@@ -160,16 +160,19 @@ git log -1 --format='%s%n%b'    # 最近 commit 的 message（辅助理解意图
 ```
 cnb issues create-issue \
   --path '{"repo": "<owner/repo>"}' \
-  --data '{"title": "<标题>", "body": "<正文 markdown>"}'
+  --data '{"title": "<标题>", "body": "<正文 markdown>", "labels": ["feature"]}'
 ```
 
 参数说明：
 - `--path` 的 `repo`：不带 `.git` 后缀的仓库名称，格式 `组织名称/仓库名称`
 - `--data` 的 `title`：Issue 标题（第 3 步生成的标题）
 - `--data` 的 `body`：Issue 正文（第 3 步生成的 markdown 正文，换行用 `\n`）
+- `--data` 的 `labels`：**默认携带 `["feature"]`**，对应标题中推断的类型。
+  标题类型为 `bugfix`/`optimization`/`refactor` 时，labels 跟着变
+  （如 `["bugfix"]`/`["optimization"]`/`["refactor"]`）。
+  用户在参数中指定了额外标签时，追加到数组里，如 `["feature", "需求"]`。
 
 可选字段（用户在参数中指定时才加）：
-- `labels`：标签数组，如 `["需求", "feature"]`
 - `assignees`：处理人数组，最多 8 人
 - `priority`：优先级，可选值 `-2P`/`-1P`/`P0`/`P1`/`P2`/`P3`
 - `start_date` / `end_date`：日期格式 `2026-01-01`
@@ -196,7 +199,8 @@ BODY=$(printf '%s\n' \
   "# 验收标准" \
   "- 验收项1" \
   "- 验收项2")
-DATA=$(jq -nc --arg title "$TITLE" --arg body "$BODY" '{title: $title, body: $body}')
+DATA=$(jq -nc --arg title "$TITLE" --arg body "$BODY" \
+  '{title: $title, body: $body, labels: ["feature"]}')
 cnb issues create-issue --path '{"repo": "genie/genie"}' --data "$DATA"
 ```
 
